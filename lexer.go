@@ -107,9 +107,23 @@ func (l *lexer) nextToken() token {
 		lit := l.s[start:l.i]
 		l.i++ // consume closing '
 		return token{typ: tString, lit: lit, pos: pos}
+	case '"':
+		// double-quoted string
+		l.i++
+		start := l.i
+		for l.i < l.n && l.s[l.i] != '"' {
+			// no escape handling (Datadog examples typically don't require it)
+			l.i++
+		}
+		if l.i >= l.n {
+			return token{typ: tString, lit: l.s[start:], pos: pos} // parser will error on missing close if needed
+		}
+		lit := l.s[start:l.i]
+		l.i++ // consume closing "
+		return token{typ: tString, lit: lit, pos: pos}
 	}
 
-	// number
+	// lexer.go (replace your "number" branch with this)
 	if isDigit(ch) || (ch == '-' && l.i+1 < l.n && isDigit(l.s[l.i+1])) {
 		j := l.i
 		if l.s[j] == '-' {
@@ -123,14 +137,21 @@ func (l *lexer) nextToken() token {
 				j++
 				continue
 			}
-			if !isDigit(c) {
+			if !isDigit(c) { // stop on first non-digit
 				break
 			}
 			j++
 		}
-		lit := l.s[l.i:j]
-		l.i = j
-		return token{typ: tNumber, lit: lit, pos: pos}
+
+		// If the next character continues an identifier (e.g. 5xx),
+		// DO NOT emit a number token here; let ident-lexing handle it.
+		if j < l.n && isIdentChar(l.s[j]) {
+			// fallthrough to ident lexing
+		} else if j > l.i {
+			lit := l.s[l.i:j]
+			l.i = j
+			return token{typ: tNumber, lit: lit, pos: pos}
+		}
 	}
 
 	// identifier-ish: accept lots of characters used in tag values / metric names / vars:

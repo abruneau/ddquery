@@ -1,30 +1,83 @@
 package ddquery
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 )
 
-func TestParse_MetricQueries_Examples(t *testing.T) {
-	cases := []string{
-		`avg:airflow.job.end{$host} by {job_name,host}.as_count()`,
-		`max:airflow.ti.finish{$host,$dag_id,$task_id,state:success} by {dag_id,task_id,state}.as_count()`,
-		`avg:airflow.dag_processing.processes{*} by {host}.as_count()`,
-		`per_hour(avg:airflow.job.end{$host} by {job_name,host}.as_count())`,
-		`outliers(per_hour(avg:airflow.job.end{$host} by {job_name,host}.as_count()), 'DBSCAN', 3)`,
-		`per_minute(per_second(avg:metric.name{$scope} by {tag}.as_rate()))`,
-		`avg:metric.name{$scope} by {tag}.as_rate()`,
-		`per_hour(avg:metric.name{$scope} by {tag}.as_rate())`,
-		`avg:metric.name{$env, param:value}.fill(zero)`,
-		`avg:metric.name{$env, param:value}.fill(zero).rollup(avg, 20)`,
-		`metric.name{param:value} by {pod_name}`,
+func loadMetricQueries(t *testing.T) []string {
+	// Get the path to testdata/metric_queries.json relative to the project root
+	// This works by finding the project root (where go.mod is) and then navigating to testdata
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Failed to get working directory: %v", err)
 	}
+
+	// Try to find the project root by looking for go.mod
+	projectRoot := wd
+	for {
+		if _, err := os.Stat(filepath.Join(projectRoot, "go.mod")); err == nil {
+			break
+		}
+		parent := filepath.Dir(projectRoot)
+		if parent == projectRoot {
+			t.Fatalf("Could not find project root (go.mod)")
+		}
+		projectRoot = parent
+	}
+
+	jsonPath := filepath.Join(projectRoot, "testdata", "metric_queries.json")
+	data, err := os.ReadFile(jsonPath)
+	if err != nil {
+		t.Fatalf("Failed to read metric queries JSON file at %s: %v", jsonPath, err)
+	}
+
+	var cases []string
+	if err := json.Unmarshal(data, &cases); err != nil {
+		t.Fatalf("Failed to parse metric queries JSON: %v", err)
+	}
+
+	return cases
+}
+
+func TestParse_MetricQueries_Examples(t *testing.T) {
+	cases := loadMetricQueries(t)
+
+	if len(cases) == 0 {
+		t.Fatal("No metric queries found in test data")
+	}
+
+	t.Logf("Testing %d metric queries from Datadog dashboards", len(cases))
+
+	var failures []string
+	successCount := 0
 
 	for _, q := range cases {
 		if _, err := Parse(q); err != nil {
-			t.Fatalf("Parse failed for %q: %v", q, err)
+			failures = append(failures, q)
+		} else {
+			successCount++
 		}
+	}
+
+	t.Logf("Successfully parsed %d/%d queries", successCount, len(cases))
+
+	if len(failures) > 0 {
+		t.Logf("Failed to parse %d queries (these may contain unsupported syntax):", len(failures))
+		// Only log first 10 failures to avoid cluttering output
+		maxLog := min(len(failures), 10)
+		for i := 0; i < maxLog; i++ {
+			t.Logf("  - %q", failures[i])
+		}
+		if len(failures) > maxLog {
+			t.Logf("  ... and %d more (see test output for full list)", len(failures)-maxLog)
+		}
+		// Uncomment the line below if you want the test to fail on any parse error:
+		t.Fatalf("%d queries failed to parse", len(failures))
 	}
 }
 
@@ -696,6 +749,151 @@ func TestParse_EdgeCases(t *testing.T) {
 				}
 				if len(mq.Modifiers[0].Args) != 0 {
 					t.Errorf("expected 0 args, got %d", len(mq.Modifiers[0].Args))
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ex, err := Parse(tt.input)
+			tt.check(t, ex, err)
+		})
+	}
+}
+
+// Test patterns that were previously failing
+func TestParse_FixedPatterns(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		check func(t *testing.T, ex Expr, err error)
+	}{
+		{
+			name:  "value with embedded colon (GCP database ID)",
+			input: "avg:gcp.cloudsql.database.disk.bytes_used{database_id:blv-shared-services:myconsole-14dc2a48}",
+			check: func(t *testing.T, ex Expr, err error) {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				mq, ok := ex.(*MetricQuery)
+				if !ok {
+					t.Fatalf("expected MetricQuery, got %T", ex)
+				}
+				term, ok := mq.Scope.(*TagTerm)
+				if !ok {
+					t.Fatalf("expected TagTerm, got %T", mq.Scope)
+				}
+				if term.Value != "blv-shared-services:myconsole-14dc2a48" {
+					t.Errorf("value: got %q, want %q", term.Value, "blv-shared-services:myconsole-14dc2a48")
+				}
+			},
+		},
+		{
+			name:  "value starting with dot",
+			input: "avg:elastic_cloud.index.docs.count{$node_name,$deployment_name ,!index_name:.internal*} by {index_name}",
+			check: func(t *testing.T, ex Expr, err error) {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				_, ok := ex.(*MetricQuery)
+				if !ok {
+					t.Fatalf("expected MetricQuery, got %T", ex)
+				}
+				// Should parse successfully
+			},
+		},
+		{
+			name:  "double-quoted string in scope",
+			input: `sum:confluent_cloud.kafka.consumer_lag_offsets{$env AND topic:"datapipeline-r2a-common*"} by {topic}`,
+			check: func(t *testing.T, ex Expr, err error) {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				_, ok := ex.(*MetricQuery)
+				if !ok {
+					t.Fatalf("expected MetricQuery, got %T", ex)
+				}
+				// Should parse successfully
+			},
+		},
+		{
+			name:  "empty value after colon",
+			input: "sum:kubernetes.liveness_probe.failure.total{env:prd,cluster_name:zeus,service:}",
+			check: func(t *testing.T, ex Expr, err error) {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				_, ok := ex.(*MetricQuery)
+				if !ok {
+					t.Fatalf("expected MetricQuery, got %T", ex)
+				}
+				// Should parse successfully with empty value
+			},
+		},
+		{
+			name:  "lowercase or with comma (mixed boolean/symbolic)",
+			input: "sum:openai.tokens.total{openai.request.model:text-ada-001 or openai.request.model:ada,$model}",
+			check: func(t *testing.T, ex Expr, err error) {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				_, ok := ex.(*MetricQuery)
+				if !ok {
+					t.Fatalf("expected MetricQuery, got %T", ex)
+				}
+				// Should parse successfully
+			},
+		},
+		{
+			name:  "variable with value (dollar-sign key)",
+			input: "sum:traefik_mesh.router.requests.count{$host,$service,$routercode:3*} by {code,router,service}",
+			check: func(t *testing.T, ex Expr, err error) {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				_, ok := ex.(*MetricQuery)
+				if !ok {
+					t.Fatalf("expected MetricQuery, got %T", ex)
+				}
+				// Should parse successfully
+			},
+		},
+		{
+			name:  "distribution query with less than",
+			input: "count(v: v<10):trace.web.request{service:api}",
+			check: func(t *testing.T, ex Expr, err error) {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				dq, ok := ex.(*DistributionQuery)
+				if !ok {
+					t.Fatalf("expected DistributionQuery, got %T", ex)
+				}
+				if dq.Comparator != "<" {
+					t.Errorf("comparator: got %q, want %q", dq.Comparator, "<")
+				}
+				if dq.Threshold != 10 {
+					t.Errorf("threshold: got %f, want %f", dq.Threshold, 10.0)
+				}
+			},
+		},
+		{
+			name:  "distribution query with greater than or equal",
+			input: "count(v: v>=0):data_streams.latency{direction:in}",
+			check: func(t *testing.T, ex Expr, err error) {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				dq, ok := ex.(*DistributionQuery)
+				if !ok {
+					t.Fatalf("expected DistributionQuery, got %T", ex)
+				}
+				if dq.Comparator != ">=" {
+					t.Errorf("comparator: got %q, want %q", dq.Comparator, ">=")
+				}
+				if dq.Threshold != 0 {
+					t.Errorf("threshold: got %f, want %f", dq.Threshold, 0.0)
 				}
 			},
 		},

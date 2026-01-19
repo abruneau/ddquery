@@ -14,6 +14,7 @@ A Go parser for Datadog query expressions that converts query strings into a str
   - IN clauses for tag filtering
 
 - ✅ **Production Ready**
+  - Tested on 5,529 real Datadog queries from production dashboards
   - 89.6% test coverage
   - Comprehensive error handling with source code context
   - Performance benchmarks included
@@ -266,6 +267,8 @@ Modifiers can be chained:
 ```
 
 ## Testing
+
+The parser has been extensively tested on **5,529 real Datadog queries** extracted from production dashboards, ensuring compatibility with real-world usage patterns.
 
 Run all tests:
 

@@ -47,6 +47,21 @@ type FuncCall struct {
 
 func (*FuncCall) isExpr() {}
 
+// DistributionQuery represents a Datadog distribution/histogram query with a value filter.
+//
+// Example: "count(v: v<10):trace.web.request{service:api}.as_count()"
+//
+// This syntax is used to count histogram values that meet a certain threshold.
+// The comparison can be <, <=, >, or >=.
+type DistributionQuery struct {
+	Function   string       // Function name (typically "count")
+	Comparator string       // Comparison operator: "<", "<=", ">", or ">="
+	Threshold  float64      // Threshold value for comparison
+	Query      *MetricQuery // The underlying metric query
+}
+
+func (*DistributionQuery) isExpr() {}
+
 // StringLit represents a string literal expression.
 //
 // Example: "'DBSCAN'" in "outliers(..., 'DBSCAN', ...)"
