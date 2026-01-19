@@ -541,10 +541,7 @@ func (p *Parser) parseParenValueList() ([]string, error) {
 // ---- Symbolic scope: term (',' term)*, optional leading '!' on term ----
 func (p *Parser) parseTagSymbolic() (TagExpr, error) {
 	items := []TagExpr{}
-	for {
-		if p.l.peek().typ == tRBrace {
-			break
-		}
+	for p.l.peek().typ != tRBrace {
 		neg := false
 		if p.l.peek().typ == tBang {
 			neg = true
