@@ -161,8 +161,13 @@ func (p *Parser) parsePrimary() (Expr, error) {
 		return &NumberLit{Value: f}, nil
 	}
 
-	// IDENT: could be funcCall, metricQuery, or ident literal (e.g. "zero" in fill(zero))
+	// IDENT: could be funcCall, metricQuery, distribution query, or ident literal (e.g. "zero" in fill(zero))
 	if t.typ == tIdent {
+		// Check for distribution query pattern: count(v: v<10):metric{...}
+		if distQuery, err := p.tryParseDistributionQuery(); err == nil && distQuery != nil {
+			return distQuery, nil
+		}
+
 		// function call lookahead: IDENT '('
 		if p.peek2().typ == tLParen {
 			return p.parseFuncCall()
@@ -182,6 +187,106 @@ func (p *Parser) parsePrimary() (Expr, error) {
 	}
 
 	return nil, p.errf(t, "unexpected token %q (expected expression)", t.lit)
+}
+
+func (p *Parser) tryParseDistributionQuery() (*DistributionQuery, error) {
+	// Save lexer state for rollback
+	save := *p.l
+	restore := func() { p.l = &save }
+
+	// Check for pattern: count(v: v<10):metric{...}
+	funcTok := p.l.peek()
+	if funcTok.typ != tIdent || funcTok.lit != "count" {
+		restore()
+		return nil, nil
+	}
+	funcName := funcTok.lit
+	p.l.advance() // consume "count"
+
+	// Must have '('
+	if p.l.peek().typ != tLParen {
+		restore()
+		return nil, nil
+	}
+	p.l.advance() // consume '('
+
+	// Must have identifier followed by ':'
+	// Pattern is: v: v<10 or v: v>=0
+	varTok := p.l.peek()
+	if varTok.typ != tIdent {
+		restore()
+		return nil, nil
+	}
+	p.l.advance() // consume first identifier (typically "v")
+
+	if p.l.peek().typ != tColon {
+		restore()
+		return nil, nil
+	}
+	p.l.advance() // consume ':'
+
+	// Now we should have: v<10, v>=0, etc.
+	// Skip optional second 'v'
+	if p.l.peek().typ == tIdent && p.l.peek().lit == "v" {
+		p.l.advance()
+	}
+
+	// Get comparison operator
+	opTok := p.l.peek()
+	if opTok.typ != tIdent || (opTok.lit != "<" && opTok.lit != ">") {
+		restore()
+		return nil, nil
+	}
+	opLit := opTok.lit
+	p.l.advance() // consume < or >
+
+	// Check for optional '=' for <= or >=
+	comparator := opLit
+	if p.l.peek().typ == tIdent && p.l.peek().lit == "=" {
+		comparator = opLit + "="
+		p.l.advance() // consume '='
+	}
+
+	// Get the threshold number
+	numTok := p.l.peek()
+	if numTok.typ != tNumber {
+		restore()
+		return nil, nil
+	}
+	threshold, err := parseFloatStrict(numTok.lit)
+	if err != nil {
+		restore()
+		return nil, nil
+	}
+	p.l.advance() // consume number
+
+	// Must have ')'
+	if p.l.peek().typ != tRParen {
+		restore()
+		return nil, nil
+	}
+	p.l.advance() // consume ')'
+
+	// Must have ':' before metric query
+	if p.l.peek().typ != tColon {
+		restore()
+		return nil, nil
+	}
+	p.l.advance() // consume ':'
+
+	// Parse the metric query
+	mq, err := p.tryParseMetricQuery()
+	if err != nil || mq == nil {
+		restore()
+		return nil, nil
+	}
+
+	return &DistributionQuery{
+		Function:   funcName,
+		Comparator: comparator,
+		Threshold:  threshold,
+		Query:      mq,
+	}, nil
 }
 
 func (p *Parser) parseFuncCall() (Expr, error) {
@@ -416,8 +521,9 @@ func (p *Parser) parseTagAnd() (TagExpr, error) {
 		return nil, err
 	}
 	items := []TagExpr{left}
-	for p.l.peek().typ == tAnd {
-		p.l.advance()
+	// In boolean mode, accept both 'AND' keyword and comma as AND operators
+	for p.l.peek().typ == tAnd || p.l.peek().typ == tComma {
+		p.l.advance() // consume AND or comma
 		right, err := p.parseTagNot()
 		if err != nil {
 			return nil, err
@@ -497,15 +603,15 @@ func (p *Parser) parseTagAtom() (TagExpr, error) {
 		return &TagIn{Negated: false, Key: ident, Values: vals}, nil
 	}
 
-	// key:value
+	// key:value (greedy parsing to handle colons, dots, etc. in values)
 	if p.l.peek().typ == tColon {
-		p.l.advance()
-		vTok := p.l.peek()
-		if vTok.typ != tIdent && vTok.typ != tString && vTok.typ != tNumber {
-			return nil, p.errf(vTok, "expected value (identifier, string, or number) after ':'")
+		p.l.advance()                                 // consume ':'
+		value, rawValue, err := p.parseTagValue(true) // boolean mode
+		if err != nil {
+			return nil, err
 		}
-		p.l.advance()
-		return &TagTerm{Key: ident, Value: vTok.lit, Raw: ident + ":" + vTok.lit}, nil
+		raw := ident + ":" + rawValue
+		return &TagTerm{Key: ident, Value: value, Raw: raw}, nil
 	}
 
 	// bare term
@@ -553,19 +659,28 @@ func (p *Parser) parseTagSymbolic() (TagExpr, error) {
 		}
 		ident := p.l.advance().lit
 
-		// $variable
-		if len(ident) > 0 && ident[0] == '$' {
-			items = append(items, &TagTerm{Negated: neg, Variable: ident[1:], Raw: ident})
-		} else if p.l.peek().typ == tColon {
-			p.l.advance()
-			vTok := p.l.peek()
-			if vTok.typ != tIdent && vTok.typ != tString && vTok.typ != tNumber {
-				return nil, p.errf(vTok, "expected value (identifier, string, or number) after ':'")
+		// Check for key:value first (even for $variables, they can have values like $routercode:3*)
+		if p.l.peek().typ == tColon {
+			p.l.advance()                                  // consume ':'
+			value, rawValue, err := p.parseTagValue(false) // symbolic mode
+			if err != nil {
+				return nil, err
 			}
-			p.l.advance()
-			items = append(items, &TagTerm{Negated: neg, Key: ident, Value: vTok.lit, Raw: ident + ":" + vTok.lit})
+			raw := ident + ":" + rawValue
+			// If identifier starts with $, it could be a variable or a key
+			// If it has a value after :, treat as key-value pair
+			if len(ident) > 0 && ident[0] == '$' {
+				items = append(items, &TagTerm{Negated: neg, Key: ident, Value: value, Raw: raw})
+			} else {
+				items = append(items, &TagTerm{Negated: neg, Key: ident, Value: value, Raw: raw})
+			}
 		} else {
-			items = append(items, &TagTerm{Negated: neg, Key: ident, Raw: ident})
+			// No colon - could be $variable or bare key
+			if len(ident) > 0 && ident[0] == '$' {
+				items = append(items, &TagTerm{Negated: neg, Variable: ident[1:], Raw: ident})
+			} else {
+				items = append(items, &TagTerm{Negated: neg, Key: ident, Raw: ident})
+			}
 		}
 
 		if p.l.peek().typ == tComma {
@@ -585,6 +700,89 @@ func (p *Parser) parseTagSymbolic() (TagExpr, error) {
 }
 
 // ---- helpers ----
+
+// parseTagValue greedily consumes tokens to form a tag value until a delimiter is encountered.
+// Delimiters are: comma, closing brace, closing paren, or AND/OR/NOT (always check for boolean ops).
+// Returns the value string and the raw source text.
+func (p *Parser) parseTagValue(inBooleanMode bool) (value string, raw string, err error) {
+	// Check if we have an empty value (next token is a delimiter)
+	// Always check for boolean operators, even in symbolic mode, as they indicate mode switch
+	next := p.l.peek()
+	if next.typ == tComma || next.typ == tRBrace || next.typ == tRParen ||
+		next.typ == tAnd || next.typ == tOr || next.typ == tNot {
+		// Empty value
+		return "", "", nil
+	}
+
+	// Find the end position by looking ahead for delimiter tokens
+	// Save lexer state to peek ahead without consuming
+	save := *p.l
+	endPos := len(p.src) // default to end of string
+
+	// Scan ahead to find where the next delimiter token starts
+	// Always check for boolean operators as they indicate a delimiter
+	for {
+		t := p.l.peek()
+		if t.typ == tComma || t.typ == tRBrace || t.typ == tRParen ||
+			t.typ == tAnd || t.typ == tOr || t.typ == tNot ||
+			t.typ == tEOF {
+			endPos = t.pos
+			break
+		}
+		p.l.advance()
+	}
+
+	// Restore lexer state
+	p.l = &save
+
+	// Now consume tokens and build value until we reach endPos
+	startPos := next.pos
+	var tokens []token
+	var lastTokenEnd int
+
+	for {
+		t := p.l.peek()
+		// Stop if we've reached or passed the end position
+		if t.pos >= endPos || t.typ == tEOF {
+			break
+		}
+		// Check for delimiter tokens (always check boolean ops)
+		if t.typ == tComma || t.typ == tRBrace || t.typ == tRParen ||
+			t.typ == tAnd || t.typ == tOr || t.typ == tNot {
+			break
+		}
+		// Consume token
+		consumed := p.l.advance()
+		tokens = append(tokens, consumed)
+		lastTokenEnd = consumed.pos + len(consumed.lit)
+	}
+
+	if len(tokens) == 0 {
+		return "", "", nil
+	}
+
+	// Extract raw text from source
+	if startPos < 0 || startPos > len(p.src) {
+		startPos = 0
+	}
+	if lastTokenEnd > len(p.src) {
+		lastTokenEnd = len(p.src)
+	}
+	if lastTokenEnd < startPos {
+		lastTokenEnd = startPos
+	}
+	raw = p.src[startPos:lastTokenEnd]
+
+	// Build value by concatenating token literals
+	// This handles cases like "blv-prd:mysql" where colon is a separate token
+	parts := make([]string, len(tokens))
+	for i, tok := range tokens {
+		parts[i] = tok.lit
+	}
+	value = strings.Join(parts, "")
+
+	return value, raw, nil
+}
 
 func (p *Parser) parseIdentListUntil(end tokenType) ([]string, error) {
 	out := []string{}
