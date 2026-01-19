@@ -1,9 +1,10 @@
 package main
 
 import (
-	"ddquery"
 	"fmt"
 	"log"
+
+	"github.com/abruneau/ddquery"
 )
 
 func main() {
