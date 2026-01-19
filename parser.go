@@ -207,9 +207,9 @@ func (p *Parser) parseFuncCall() (Expr, error) {
 		}
 	}
 
-		if err := p.expect(tRParen, "expected ')' to close function arguments"); err != nil {
-			return nil, err
-		}
+	if err := p.expect(tRParen, "expected ')' to close function arguments"); err != nil {
+		return nil, err
+	}
 	return &FuncCall{Name: name, Args: args}, nil
 }
 
@@ -541,10 +541,7 @@ func (p *Parser) parseParenValueList() ([]string, error) {
 // ---- Symbolic scope: term (',' term)*, optional leading '!' on term ----
 func (p *Parser) parseTagSymbolic() (TagExpr, error) {
 	items := []TagExpr{}
-	for {
-		if p.l.peek().typ == tRBrace {
-			break
-		}
+	for p.l.peek().typ != tRBrace {
 		neg := false
 		if p.l.peek().typ == tBang {
 			neg = true
