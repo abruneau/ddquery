@@ -207,9 +207,9 @@ func (p *Parser) parseFuncCall() (Expr, error) {
 		}
 	}
 
-		if err := p.expect(tRParen, "expected ')' to close function arguments"); err != nil {
-			return nil, err
-		}
+	if err := p.expect(tRParen, "expected ')' to close function arguments"); err != nil {
+		return nil, err
+	}
 	return &FuncCall{Name: name, Args: args}, nil
 }
 
