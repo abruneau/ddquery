@@ -717,7 +717,7 @@ func (p *Parser) parseTagValue(inBooleanMode bool) (value string, raw string, er
 	// Find the end position by looking ahead for delimiter tokens
 	// Save lexer state to peek ahead without consuming
 	save := *p.l
-	endPos := len(p.src) // default to end of string
+	var endPos int
 
 	// Scan ahead to find where the next delimiter token starts
 	// Always check for boolean operators as they indicate a delimiter
