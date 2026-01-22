@@ -907,6 +907,771 @@ func TestParse_FixedPatterns(t *testing.T) {
 	}
 }
 
+// Test arithmetic operations
+func TestParse_Arithmetic(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		check func(t *testing.T, ex Expr, err error)
+	}{
+		{
+			name:  "simple addition",
+			input: "sum:metric1{*} + sum:metric2{*}",
+			check: func(t *testing.T, ex Expr, err error) {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				op, ok := ex.(*BinaryOp)
+				if !ok {
+					t.Fatalf("expected BinaryOp, got %T", ex)
+				}
+				if op.Op != "+" {
+					t.Errorf("op: got %q, want '+'", op.Op)
+				}
+			},
+		},
+		{
+			name:  "simple subtraction",
+			input: "sum:metric1{*} - sum:metric2{*}",
+			check: func(t *testing.T, ex Expr, err error) {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				op, ok := ex.(*BinaryOp)
+				if !ok {
+					t.Fatalf("expected BinaryOp, got %T", ex)
+				}
+				if op.Op != "-" {
+					t.Errorf("op: got %q, want '-'", op.Op)
+				}
+			},
+		},
+		{
+			name:  "simple multiplication",
+			input: "sum:metric1{*} * 100",
+			check: func(t *testing.T, ex Expr, err error) {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				op, ok := ex.(*BinaryOp)
+				if !ok {
+					t.Fatalf("expected BinaryOp, got %T", ex)
+				}
+				if op.Op != "*" {
+					t.Errorf("op: got %q, want '*'", op.Op)
+				}
+			},
+		},
+		{
+			name:  "simple division",
+			input: "sum:metric1{*} / sum:metric2{*}",
+			check: func(t *testing.T, ex Expr, err error) {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				op, ok := ex.(*BinaryOp)
+				if !ok {
+					t.Fatalf("expected BinaryOp, got %T", ex)
+				}
+				if op.Op != "/" {
+					t.Errorf("op: got %q, want '/'", op.Op)
+				}
+			},
+		},
+		{
+			name:  "precedence: multiplication before addition",
+			input: "a + b * c",
+			check: func(t *testing.T, ex Expr, err error) {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				// Should parse as: a + (b * c)
+				op, ok := ex.(*BinaryOp)
+				if !ok || op.Op != "+" {
+					t.Fatalf("expected BinaryOp with '+', got %T", ex)
+				}
+				right, ok := op.Right.(*BinaryOp)
+				if !ok || right.Op != "*" {
+					t.Fatalf("expected right operand to be BinaryOp with '*', got %T", op.Right)
+				}
+			},
+		},
+		{
+			name:  "precedence: division before subtraction",
+			input: "a - b / c",
+			check: func(t *testing.T, ex Expr, err error) {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				// Should parse as: a - (b / c)
+				op, ok := ex.(*BinaryOp)
+				if !ok || op.Op != "-" {
+					t.Fatalf("expected BinaryOp with '-', got %T", ex)
+				}
+				right, ok := op.Right.(*BinaryOp)
+				if !ok || right.Op != "/" {
+					t.Fatalf("expected right operand to be BinaryOp with '/', got %T", op.Right)
+				}
+			},
+		},
+		{
+			name:  "parentheses override precedence",
+			input: "(a + b) * c",
+			check: func(t *testing.T, ex Expr, err error) {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				// Should parse as: (a + b) * c
+				op, ok := ex.(*BinaryOp)
+				if !ok || op.Op != "*" {
+					t.Fatalf("expected BinaryOp with '*', got %T", ex)
+				}
+				left, ok := op.Left.(*BinaryOp)
+				if !ok || left.Op != "+" {
+					t.Fatalf("expected left operand to be BinaryOp with '+', got %T", op.Left)
+				}
+			},
+		},
+		{
+			name:  "left associativity: subtraction",
+			input: "a - b - c",
+			check: func(t *testing.T, ex Expr, err error) {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				// Should parse as: ((a - b) - c)
+				op, ok := ex.(*BinaryOp)
+				if !ok || op.Op != "-" {
+					t.Fatalf("expected BinaryOp with '-', got %T", ex)
+				}
+				left, ok := op.Left.(*BinaryOp)
+				if !ok || left.Op != "-" {
+					t.Fatalf("expected left operand to be BinaryOp with '-', got %T", op.Left)
+				}
+			},
+		},
+		{
+			name:  "left associativity: division",
+			input: "a / b / c",
+			check: func(t *testing.T, ex Expr, err error) {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				// Should parse as: ((a / b) / c)
+				op, ok := ex.(*BinaryOp)
+				if !ok || op.Op != "/" {
+					t.Fatalf("expected BinaryOp with '/', got %T", ex)
+				}
+				left, ok := op.Left.(*BinaryOp)
+				if !ok || left.Op != "/" {
+					t.Fatalf("expected left operand to be BinaryOp with '/', got %T", op.Left)
+				}
+			},
+		},
+		{
+			name:  "complex nested arithmetic",
+			input: "( ( sum:metric1{*} - sum:metric2{*} ) / sum:metric3{*} ) * 100",
+			check: func(t *testing.T, ex Expr, err error) {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				// Should parse successfully
+				_, ok := ex.(*BinaryOp)
+				if !ok {
+					t.Fatalf("expected BinaryOp, got %T", ex)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ex, err := Parse(tt.input)
+			tt.check(t, ex, err)
+		})
+	}
+}
+
+// Test unary operators
+func TestParse_UnaryOperators(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		check func(t *testing.T, ex Expr, err error)
+	}{
+		{
+			name:  "unary minus on metric query",
+			input: "-sum:metric{*}",
+			check: func(t *testing.T, ex Expr, err error) {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				unary, ok := ex.(*UnaryOp)
+				if !ok {
+					t.Fatalf("expected UnaryOp, got %T", ex)
+				}
+				if unary.Op != "-" {
+					t.Errorf("op: got %q, want '-'", unary.Op)
+				}
+				_, ok = unary.Expr.(*MetricQuery)
+				if !ok {
+					t.Fatalf("expected MetricQuery as operand, got %T", unary.Expr)
+				}
+			},
+		},
+		{
+			name:  "unary minus on function call",
+			input: "-func()",
+			check: func(t *testing.T, ex Expr, err error) {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				unary, ok := ex.(*UnaryOp)
+				if !ok {
+					t.Fatalf("expected UnaryOp, got %T", ex)
+				}
+				if unary.Op != "-" {
+					t.Errorf("op: got %q, want '-'", unary.Op)
+				}
+			},
+		},
+		{
+			name:  "unary plus",
+			input: "+100",
+			check: func(t *testing.T, ex Expr, err error) {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				unary, ok := ex.(*UnaryOp)
+				if !ok {
+					t.Fatalf("expected UnaryOp, got %T", ex)
+				}
+				if unary.Op != "+" {
+					t.Errorf("op: got %q, want '+'", unary.Op)
+				}
+			},
+		},
+		{
+			name:  "double unary minus",
+			input: "--x",
+			check: func(t *testing.T, ex Expr, err error) {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				unary, ok := ex.(*UnaryOp)
+				if !ok {
+					t.Fatalf("expected UnaryOp, got %T", ex)
+				}
+				if unary.Op != "-" {
+					t.Errorf("outer op: got %q, want '-'", unary.Op)
+				}
+				inner, ok := unary.Expr.(*UnaryOp)
+				if !ok {
+					t.Fatalf("expected inner UnaryOp, got %T", unary.Expr)
+				}
+				if inner.Op != "-" {
+					t.Errorf("inner op: got %q, want '-'", inner.Op)
+				}
+			},
+		},
+		{
+			name:  "unary minus with metric query and modifiers",
+			input: "-sum:nginx.ssl.handshakes_failed_count{*} by {host}.as_count()",
+			check: func(t *testing.T, ex Expr, err error) {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				unary, ok := ex.(*UnaryOp)
+				if !ok {
+					t.Fatalf("expected UnaryOp, got %T", ex)
+				}
+				if unary.Op != "-" {
+					t.Errorf("op: got %q, want '-'", unary.Op)
+				}
+			},
+		},
+		{
+			name:  "zero minus expression",
+			input: "0 - per_second(avg:metric{*})",
+			check: func(t *testing.T, ex Expr, err error) {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				op, ok := ex.(*BinaryOp)
+				if !ok || op.Op != "-" {
+					t.Fatalf("expected BinaryOp with '-', got %T", ex)
+				}
+				left, ok := op.Left.(*NumberLit)
+				if !ok || left.Value != 0 {
+					t.Fatalf("expected NumberLit(0) as left operand, got %T", op.Left)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ex, err := Parse(tt.input)
+			tt.check(t, ex, err)
+		})
+	}
+}
+
+// Test numeric literals as standalone expressions
+func TestParse_NumericLiterals(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		check func(t *testing.T, ex Expr, err error)
+	}{
+		{
+			name:  "standalone number",
+			input: "100",
+			check: func(t *testing.T, ex Expr, err error) {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				num, ok := ex.(*NumberLit)
+				if !ok {
+					t.Fatalf("expected NumberLit, got %T", ex)
+				}
+				if num.Value != 100 {
+					t.Errorf("value: got %f, want 100", num.Value)
+				}
+			},
+		},
+		{
+			name:  "number in multiplication",
+			input: "100 * sum:metric{*}",
+			check: func(t *testing.T, ex Expr, err error) {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				op, ok := ex.(*BinaryOp)
+				if !ok || op.Op != "*" {
+					t.Fatalf("expected BinaryOp with '*', got %T", ex)
+				}
+				left, ok := op.Left.(*NumberLit)
+				if !ok || left.Value != 100 {
+					t.Fatalf("expected NumberLit(100) as left operand, got %T", op.Left)
+				}
+			},
+		},
+		{
+			name:  "zero in subtraction",
+			input: "0 - sum:metric{*}",
+			check: func(t *testing.T, ex Expr, err error) {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				op, ok := ex.(*BinaryOp)
+				if !ok || op.Op != "-" {
+					t.Fatalf("expected BinaryOp with '-', got %T", ex)
+				}
+				left, ok := op.Left.(*NumberLit)
+				if !ok || left.Value != 0 {
+					t.Fatalf("expected NumberLit(0) as left operand, got %T", op.Left)
+				}
+			},
+		},
+		{
+			name:  "large number",
+			input: "1000 * sum:metric{*}",
+			check: func(t *testing.T, ex Expr, err error) {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				op, ok := ex.(*BinaryOp)
+				if !ok || op.Op != "*" {
+					t.Fatalf("expected BinaryOp with '*', got %T", ex)
+				}
+				left, ok := op.Left.(*NumberLit)
+				if !ok || left.Value != 1000 {
+					t.Fatalf("expected NumberLit(1000) as left operand, got %T", op.Left)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ex, err := Parse(tt.input)
+			tt.check(t, ex, err)
+		})
+	}
+}
+
+// Test comma-separated expression lists
+func TestParse_CommaSeparatedLists(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		check func(t *testing.T, ex Expr, err error)
+	}{
+		{
+			name:  "two metric queries",
+			input: "avg:metric1{tag:value}, avg:metric2{tag:value}",
+			check: func(t *testing.T, ex Expr, err error) {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				list, ok := ex.(*ExprList)
+				if !ok {
+					t.Fatalf("expected ExprList, got %T", ex)
+				}
+				if len(list.Exprs) != 2 {
+					t.Errorf("expected 2 expressions, got %d", len(list.Exprs))
+				}
+				for i, expr := range list.Exprs {
+					_, ok := expr.(*MetricQuery)
+					if !ok {
+						t.Errorf("expr[%d]: expected MetricQuery, got %T", i, expr)
+					}
+				}
+			},
+		},
+		{
+			name:  "three expressions",
+			input: "expr1, expr2, expr3",
+			check: func(t *testing.T, ex Expr, err error) {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				list, ok := ex.(*ExprList)
+				if !ok {
+					t.Fatalf("expected ExprList, got %T", ex)
+				}
+				if len(list.Exprs) != 3 {
+					t.Errorf("expected 3 expressions, got %d", len(list.Exprs))
+				}
+			},
+		},
+		{
+			name:  "real-world example from test data",
+			input: "avg:aerospike.namespace.tps.read{$host,$namespace}, avg:aerospike.namespace.tps.write{$host,$namespace}",
+			check: func(t *testing.T, ex Expr, err error) {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				list, ok := ex.(*ExprList)
+				if !ok {
+					t.Fatalf("expected ExprList, got %T", ex)
+				}
+				if len(list.Exprs) != 2 {
+					t.Errorf("expected 2 expressions, got %d", len(list.Exprs))
+				}
+			},
+		},
+		{
+			name:  "expressions with arithmetic",
+			input: "a + b, c * d",
+			check: func(t *testing.T, ex Expr, err error) {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				list, ok := ex.(*ExprList)
+				if !ok {
+					t.Fatalf("expected ExprList, got %T", ex)
+				}
+				if len(list.Exprs) != 2 {
+					t.Errorf("expected 2 expressions, got %d", len(list.Exprs))
+				}
+				_, ok = list.Exprs[0].(*BinaryOp)
+				if !ok {
+					t.Errorf("expr[0]: expected BinaryOp, got %T", list.Exprs[0])
+				}
+				_, ok = list.Exprs[1].(*BinaryOp)
+				if !ok {
+					t.Errorf("expr[1]: expected BinaryOp, got %T", list.Exprs[1])
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ex, err := Parse(tt.input)
+			tt.check(t, ex, err)
+		})
+	}
+}
+
+// Test edge cases for operator vs identifier ambiguity
+func TestParse_OperatorAmbiguity(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		check func(t *testing.T, ex Expr, err error)
+	}{
+		{
+			name:  "metric name with dash (no spaces)",
+			input: "metric-name{tag:value}",
+			check: func(t *testing.T, ex Expr, err error) {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				mq, ok := ex.(*MetricQuery)
+				if !ok {
+					t.Fatalf("expected MetricQuery, got %T", ex)
+				}
+				if mq.Metric != "metric-name" {
+					t.Errorf("metric: got %q, want 'metric-name'", mq.Metric)
+				}
+			},
+		},
+		{
+			name:  "metric minus name (with spaces)",
+			input: "metric - name",
+			check: func(t *testing.T, ex Expr, err error) {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				op, ok := ex.(*BinaryOp)
+				if !ok || op.Op != "-" {
+					t.Fatalf("expected BinaryOp with '-', got %T", ex)
+				}
+			},
+		},
+		{
+			name:  "metric name with slash (no spaces)",
+			input: "http/status{tag:value}",
+			check: func(t *testing.T, ex Expr, err error) {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				mq, ok := ex.(*MetricQuery)
+				if !ok {
+					t.Fatalf("expected MetricQuery, got %T", ex)
+				}
+				if mq.Metric != "http/status" {
+					t.Errorf("metric: got %q, want 'http/status'", mq.Metric)
+				}
+			},
+		},
+		{
+			name:  "a divided by b (with spaces)",
+			input: "a / b",
+			check: func(t *testing.T, ex Expr, err error) {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				op, ok := ex.(*BinaryOp)
+				if !ok || op.Op != "/" {
+					t.Fatalf("expected BinaryOp with '/', got %T", ex)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ex, err := Parse(tt.input)
+			tt.check(t, ex, err)
+		})
+	}
+}
+
+// Test real-world complex examples from test data
+func TestParse_RealWorldExamples(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		check func(t *testing.T, ex Expr, err error)
+	}{
+		{
+			name:  "complex nested arithmetic with parentheses",
+			input: "( ( sum:zookeeper.max_file_descriptor_count{*} - sum:zookeeper.open_file_descriptor_count{*} ) / sum:zookeeper.max_file_descriptor_count{*} ) * 100",
+			check: func(t *testing.T, ex Expr, err error) {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				// Should parse successfully
+				_, ok := ex.(*BinaryOp)
+				if !ok {
+					t.Fatalf("expected BinaryOp, got %T", ex)
+				}
+			},
+		},
+		{
+			name:  "unary minus on metric query",
+			input: "-sum:nginx.ssl.handshakes_failed_count{*} by {host}.as_count()",
+			check: func(t *testing.T, ex Expr, err error) {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				unary, ok := ex.(*UnaryOp)
+				if !ok {
+					t.Fatalf("expected UnaryOp, got %T", ex)
+				}
+				if unary.Op != "-" {
+					t.Errorf("op: got %q, want '-'", unary.Op)
+				}
+			},
+		},
+		{
+			name:  "zero minus function call",
+			input: "0 - per_second(avg:couchdb.couchdb.database_writes{$couchdb,$scope})",
+			check: func(t *testing.T, ex Expr, err error) {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				op, ok := ex.(*BinaryOp)
+				if !ok || op.Op != "-" {
+					t.Fatalf("expected BinaryOp with '-', got %T", ex)
+				}
+			},
+		},
+		{
+			name:  "percentage calculation",
+			input: "100 * ( avg:varnish.cache_hit{$scope} / ( avg:varnish.cache_hit{$scope} + avg:varnish.cache_miss{$scope} ) )",
+			check: func(t *testing.T, ex Expr, err error) {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				// Should parse successfully
+				_, ok := ex.(*BinaryOp)
+				if !ok {
+					t.Fatalf("expected BinaryOp, got %T", ex)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ex, err := Parse(tt.input)
+			tt.check(t, ex, err)
+		})
+	}
+}
+
+// Test operators without spaces (compact expressions)
+func TestParse_CompactExpressions(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		check func(t *testing.T, ex Expr, err error)
+	}{
+		{
+			name:  "parenthesized expression times number",
+			input: "(avg:metric{*})*100",
+			check: func(t *testing.T, ex Expr, err error) {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				op, ok := ex.(*BinaryOp)
+				if !ok || op.Op != "*" {
+					t.Fatalf("expected BinaryOp with '*', got %T", ex)
+				}
+			},
+		},
+		{
+			name:  "parenthesized expression divided by number",
+			input: "(avg:metric{*})/100",
+			check: func(t *testing.T, ex Expr, err error) {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				op, ok := ex.(*BinaryOp)
+				if !ok || op.Op != "/" {
+					t.Fatalf("expected BinaryOp with '/', got %T", ex)
+				}
+			},
+		},
+		{
+			name:  "parenthesized expression minus expression",
+			input: "(a)-b",
+			check: func(t *testing.T, ex Expr, err error) {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				op, ok := ex.(*BinaryOp)
+				if !ok || op.Op != "-" {
+					t.Fatalf("expected BinaryOp with '-', got %T", ex)
+				}
+			},
+		},
+		{
+			name:  "complex percentage calculation",
+			input: "(avg:metric1{*}-avg:metric2{*})/avg:metric1{*}*100",
+			check: func(t *testing.T, ex Expr, err error) {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				// Should parse successfully
+				_, ok := ex.(*BinaryOp)
+				if !ok {
+					t.Fatalf("expected BinaryOp, got %T", ex)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ex, err := Parse(tt.input)
+			tt.check(t, ex, err)
+		})
+	}
+}
+
+// Test * in boolean scope expressions
+func TestParse_StarInBooleanScope(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		check func(t *testing.T, ex Expr, err error)
+	}{
+		{
+			name:  "star AND key:value",
+			input: "sum:metric{* AND key:value}",
+			check: func(t *testing.T, ex Expr, err error) {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				mq, ok := ex.(*MetricQuery)
+				if !ok {
+					t.Fatalf("expected MetricQuery, got %T", ex)
+				}
+				and, ok := mq.Scope.(*TagAnd)
+				if !ok {
+					t.Fatalf("expected TagAnd scope, got %T", mq.Scope)
+				}
+				if len(and.Items) != 2 {
+					t.Errorf("expected 2 items in AND, got %d", len(and.Items))
+				}
+			},
+		},
+		{
+			name:  "star AND key IN list",
+			input: "sum:metric{* AND key IN (val1,val2)}",
+			check: func(t *testing.T, ex Expr, err error) {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				mq, ok := ex.(*MetricQuery)
+				if !ok {
+					t.Fatalf("expected MetricQuery, got %T", ex)
+				}
+				and, ok := mq.Scope.(*TagAnd)
+				if !ok {
+					t.Fatalf("expected TagAnd scope, got %T", mq.Scope)
+				}
+				if len(and.Items) != 2 {
+					t.Errorf("expected 2 items in AND, got %d", len(and.Items))
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ex, err := Parse(tt.input)
+			tt.check(t, ex, err)
+		})
+	}
+}
+
 // Helper function
 func contains(s, substr string) bool {
 	return strings.Contains(s, substr)
