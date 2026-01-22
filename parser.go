@@ -10,6 +10,10 @@
 //   - Modifiers (fill, rollup, as_count, etc.)
 //   - Variables ($var)
 //   - IN clauses for tag filtering
+//   - Arithmetic expressions with proper precedence (+, -, *, /)
+//   - Unary operators (+expr, -expr)
+//   - Numeric literals as standalone expressions
+//   - Comma-separated expression lists
 //
 // Example:
 //
@@ -22,6 +26,18 @@
 //	if ok {
 //	    fmt.Printf("Aggregator: %s\n", *mq.Aggregator)
 //	    fmt.Printf("Metric: %s\n", mq.Metric)
+//	}
+//
+// Arithmetic example:
+//
+//	query, err := Parse("(sum:hits{*} / sum:requests{*}) * 100")
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//
+//	binOp, ok := query.(*BinaryOp)
+//	if ok {
+//	    fmt.Printf("Operation: %s\n", binOp.Op)
 //	}
 //
 // The parser returns detailed error messages with source code context when
@@ -83,8 +99,16 @@ type Parser struct {
 // Parse parses a Datadog query string and returns the corresponding AST.
 //
 // The function accepts a Datadog query expression string and returns either:
-//   - An Expr representing the parsed query (MetricQuery, FuncCall, or literal)
+//   - An Expr representing the parsed query
 //   - An error if the input is invalid
+//
+// Returned expression types:
+//   - MetricQuery: Metric query with aggregator, scope, group-by, and modifiers
+//   - FuncCall: Function call expression
+//   - BinaryOp: Arithmetic operation (+, -, *, /)
+//   - UnaryOp: Unary operation (+expr, -expr)
+//   - ExprList: Comma-separated list of expressions
+//   - NumberLit, StringLit, IdentLit: Literal values
 //
 // Supported query formats:
 //
@@ -93,6 +117,8 @@ type Parser struct {
 //   - Nested functions: "outliers(per_hour(avg:metric.name{env:prod}), 'DBSCAN', 3)"
 //   - Boolean scopes: "metric{(env:prd OR env:shd) AND $product}"
 //   - IN clauses: "metric{key IN (val1, val2, val3)}"
+//   - Arithmetic: "(sum:metric1{*} - sum:metric2{*}) / sum:metric3{*} * 100"
+//   - Expression lists: "metric1{*}, metric2{*}, metric3{*}"
 //
 // Example:
 //
@@ -118,23 +144,117 @@ func Parse(s string) (Expr, error) {
 	}
 	if p.l.peek().typ != tEOF {
 		t := p.l.peek()
+		// Allow comma at top level for expression lists
+		if t.typ == tComma {
+			// This should have been handled by parseExpr, but if we get here,
+			// it means there's a trailing comma or something unexpected
+			return nil, p.errf(t, "unexpected token %q after end of expression", t.lit)
+		}
 		return nil, p.errf(t, "unexpected token %q after end of expression", t.lit)
 	}
 	return ex, nil
 }
 
-// Expr grammar (minimal): Primary only (Datadog arithmetic exists but not needed for your examples).
+// parseExpr handles comma-separated expression lists (lowest precedence).
+// If there's only one expression, it returns that expression directly.
+// If there are multiple comma-separated expressions, it returns an ExprList.
 func (p *Parser) parseExpr() (Expr, error) {
+	first, err := p.parseAddSub()
+	if err != nil {
+		return nil, err
+	}
+
+	// Check for comma-separated list
+	if p.l.peek().typ == tComma {
+		exprs := []Expr{first}
+		for p.l.peek().typ == tComma {
+			p.l.advance() // consume comma
+			next, err := p.parseAddSub()
+			if err != nil {
+				return nil, err
+			}
+			exprs = append(exprs, next)
+		}
+		return &ExprList{Exprs: exprs}, nil
+	}
+
+	return first, nil
+}
+
+// parseAddSub handles addition and subtraction (left-associative).
+func (p *Parser) parseAddSub() (Expr, error) {
+	left, err := p.parseMulDiv()
+	if err != nil {
+		return nil, err
+	}
+
+	for {
+		t := p.l.peek()
+		if t.typ != tPlus && t.typ != tMinus {
+			break
+		}
+		op := t.lit
+		p.l.advance() // consume operator
+
+		right, err := p.parseMulDiv()
+		if err != nil {
+			return nil, err
+		}
+
+		left = &BinaryOp{Op: op, Left: left, Right: right}
+	}
+
+	return left, nil
+}
+
+// parseMulDiv handles multiplication and division (left-associative).
+func (p *Parser) parseMulDiv() (Expr, error) {
+	left, err := p.parseUnary()
+	if err != nil {
+		return nil, err
+	}
+
+	for {
+		t := p.l.peek()
+		if t.typ != tStar && t.typ != tSlash {
+			break
+		}
+		op := t.lit
+		p.l.advance() // consume operator
+
+		right, err := p.parseUnary()
+		if err != nil {
+			return nil, err
+		}
+
+		left = &BinaryOp{Op: op, Left: left, Right: right}
+	}
+
+	return left, nil
+}
+
+// parseUnary handles unary operators: +expr, -expr
+func (p *Parser) parseUnary() (Expr, error) {
+	t := p.l.peek()
+	if t.typ == tPlus || t.typ == tMinus {
+		op := t.lit
+		p.l.advance()               // consume operator
+		expr, err := p.parseUnary() // recursive for cases like --x
+		if err != nil {
+			return nil, err
+		}
+		return &UnaryOp{Op: op, Expr: expr}, nil
+	}
 	return p.parsePrimary()
 }
 
 func (p *Parser) parsePrimary() (Expr, error) {
 	t := p.l.peek()
 
-	// parenthesized expression (mostly for nested query args)
+	// parenthesized expression (supports full arithmetic expressions)
 	if t.typ == tLParen {
 		p.l.advance()
-		ex, err := p.parseExpr()
+		ex, err := p.parseExpr() // parseExpr handles full arithmetic with precedence
 		if err != nil {
 			return nil, err
 		}
@@ -299,7 +419,9 @@ func (p *Parser) parseFuncCall() (Expr, error) {
 	args := []Expr{}
 	if p.l.peek().typ != tRParen {
 		for {
-			arg, err := p.parseExpr()
+			// Use parseAddSub() instead of parseExpr() to avoid creating ExprList
+			// Function arguments are already comma-separated by the loop here
+			arg, err := p.parseAddSub()
 			if err != nil {
 				return nil, err
 			}
@@ -572,10 +694,17 @@ func (p *Parser) parseTagAtom() (TagExpr, error) {
 		return ex, nil
 	}
 
-	if t.typ != tIdent {
+	// Allow * as a tag term (for {* AND ...} patterns in boolean mode)
+	if t.typ != tIdent && t.typ != tStar {
 		return nil, p.errf(t, "expected tag term in scope, got %q", t.lit)
 	}
-	ident := p.l.advance().lit
+	var ident string
+	if t.typ == tStar {
+		ident = "*"
+		p.l.advance()
+	} else {
+		ident = p.l.advance().lit
+	}
 
 	// $variable
 	if len(ident) > 0 && ident[0] == '$' {
@@ -654,10 +783,17 @@ func (p *Parser) parseTagSymbolic() (TagExpr, error) {
 			p.l.advance()
 		}
 		t := p.l.peek()
-		if t.typ != tIdent {
+		// Allow * as a tag term (for {*} meaning "match all")
+		if t.typ != tIdent && t.typ != tStar {
 			return nil, p.errf(t, "expected tag term")
 		}
-		ident := p.l.advance().lit
+		var ident string
+		if t.typ == tStar {
+			ident = "*"
+			p.l.advance()
+		} else {
+			ident = p.l.advance().lit
+		}
 
 		// Check for key:value first (even for $variables, they can have values like $routercode:3*)
 		if p.l.peek().typ == tColon {
@@ -865,6 +1001,14 @@ func tokenTypeName(tt tokenType) string {
 		return "'.'"
 	case tBang:
 		return "'!'"
+	case tPlus:
+		return "'+'"
+	case tMinus:
+		return "'-'"
+	case tStar:
+		return "'*'"
+	case tSlash:
+		return "'/'"
 	case tBy:
 		return "'by'"
 	case tAnd:

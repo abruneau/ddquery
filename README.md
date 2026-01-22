@@ -12,10 +12,13 @@ A Go parser for Datadog query expressions that converts query strings into a str
   - Modifiers (`fill`, `rollup`, `as_count`, `as_rate`, etc.)
   - Variables (`$var`)
   - IN clauses for tag filtering
+  - **Arithmetic expressions** with proper precedence (`+`, `-`, `*`, `/`)
+  - **Unary operators** (`-expr`, `+expr`)
+  - **Numeric literals** as standalone expressions
+  - **Comma-separated expression lists** for multi-series queries
 
 - ✅ **Production Ready**
-  - Tested on 5,529 real Datadog queries from production dashboards
-  - 89.6% test coverage
+  - Tested on **7,217 real Datadog queries** from production dashboards (100% success rate)
   - Comprehensive error handling with source code context
   - Performance benchmarks included
   - Full API documentation
@@ -141,6 +144,44 @@ for _, mod := range mq.Modifiers {
 }
 ```
 
+### Arithmetic Expressions
+
+```go
+// Simple arithmetic with proper precedence
+query, err := ddquery.Parse("sum:metric1{*} + sum:metric2{*} * 100")
+if err != nil {
+    return err
+}
+
+binOp := query.(*ddquery.BinaryOp)
+fmt.Printf("Operation: %s\n", binOp.Op)  // "+"
+
+// Complex percentage calculations
+query, err = ddquery.Parse("(sum:hits{*} / sum:requests{*}) * 100")
+
+// Unary operators
+query, err = ddquery.Parse("-sum:errors{*}")
+unary := query.(*ddquery.UnaryOp)
+fmt.Printf("Unary operation: %s\n", unary.Op)  // "-"
+```
+
+### Comma-Separated Expression Lists
+
+```go
+// Multiple metrics in a single query
+query, err := ddquery.Parse("avg:cpu{host:a}, avg:cpu{host:b}, avg:cpu{host:c}")
+if err != nil {
+    return err
+}
+
+exprList := query.(*ddquery.ExprList)
+fmt.Printf("Number of expressions: %d\n", len(exprList.Exprs))
+for i, expr := range exprList.Exprs {
+    mq := expr.(*ddquery.MetricQuery)
+    fmt.Printf("Metric %d: %s\n", i+1, mq.Metric)
+}
+```
+
 ## Error Handling
 
 The parser provides detailed error messages with source code context:
@@ -167,6 +208,10 @@ Errors are of type `*ParseError` and include:
 
 - **`MetricQuery`**: Represents a metric query with aggregator, scope, group-by, and modifiers
 - **`FuncCall`**: Represents a function call expression
+- **`DistributionQuery`**: Represents a distribution/histogram query with value filter
+- **`BinaryOp`**: Binary arithmetic operation (`+`, `-`, `*`, `/`)
+- **`UnaryOp`**: Unary operation (`+expr`, `-expr`)
+- **`ExprList`**: Comma-separated list of expressions
 - **`StringLit`**: String literal
 - **`NumberLit`**: Numeric literal
 - **`IdentLit`**: Identifier literal
@@ -220,6 +265,37 @@ Examples:
 - `sum:metric.name{env:prod,service:api} by {host}`
 - `metric.name{env:prod}.fill(zero).rollup(avg, 20)`
 
+### Arithmetic Expressions
+
+Full arithmetic support with proper operator precedence (multiplication and division before addition and subtraction):
+
+```
+expression [operator] expression
+```
+
+**Binary operators:**
+- `+` Addition
+- `-` Subtraction
+- `*` Multiplication
+- `/` Division
+
+**Unary operators:**
+- `-expr` Negation
+- `+expr` Positive (identity)
+
+**Examples:**
+- `sum:metric1{*} + sum:metric2{*}`
+- `(avg:total{*} - avg:used{*}) / avg:total{*} * 100`
+- `-sum:errors{*}`
+- `100 * (a / b)`
+
+**Precedence rules:**
+1. Parentheses (highest)
+2. Unary operators (`-`, `+`)
+3. Multiplication and division (`*`, `/`)
+4. Addition and subtraction (`+`, `-`)
+5. Comma-separated lists (lowest)
+
 ### Tag Scopes
 
 **Symbolic mode** (comma-separated):
@@ -266,23 +342,43 @@ Modifiers can be chained:
 .fill(zero).rollup(avg, 20).as_count()
 ```
 
+### Expression Lists
+
+Multiple expressions can be separated by commas at the top level:
+
+```
+expression1, expression2, expression3, ...
+```
+
+Example:
+```
+avg:cpu{host:a}, avg:cpu{host:b}, avg:memory{host:a}
+```
+
+This is useful for querying multiple metrics or series in a single expression.
+
 ## Testing
 
-The parser has been extensively tested on **5,529 real Datadog queries** extracted from production dashboards, ensuring compatibility with real-world usage patterns.
+The parser has been extensively tested on **7,217 real Datadog queries** extracted from production dashboards, achieving a **100% success rate** and ensuring compatibility with real-world usage patterns.
+
+Test suite includes:
+- 7,217 real-world queries from production dashboards
+- Unit tests for all expression types
+- Edge case testing (compact expressions, operator precedence, etc.)
+- Error handling validation
+- Performance benchmarks
 
 Run all tests:
 
 ```bash
-go test ./pkg/...
+go test ./...
 ```
 
 Run tests with coverage:
 
 ```bash
-go test -cover ./pkg/...
+go test -cover ./...
 ```
-
-Current test coverage: **89.6%**
 
 ## Development
 

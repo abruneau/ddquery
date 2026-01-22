@@ -5,9 +5,13 @@ package ddquery
 // The following types implement Expr:
 //   - MetricQuery: A metric query with aggregator, scope, and modifiers
 //   - FuncCall: A function call expression
+//   - DistributionQuery: A distribution query with value filter
 //   - StringLit: A string literal
 //   - NumberLit: A numeric literal
 //   - IdentLit: An identifier literal
+//   - BinaryOp: A binary arithmetic operation (+, -, *, /)
+//   - UnaryOp: A unary operation (+expr, -expr)
+//   - ExprList: A comma-separated list of expressions
 type Expr interface {
 	isExpr()
 }
@@ -82,6 +86,36 @@ func (*NumberLit) isExpr() {}
 type IdentLit struct{ Name string }
 
 func (*IdentLit) isExpr() {}
+
+// BinaryOp represents binary arithmetic operations: +, -, *, /
+//
+// Example: "a + b", "x * y", "(a - b) / c"
+type BinaryOp struct {
+	Op    string // Operator: "+", "-", "*", or "/"
+	Left  Expr   // Left operand
+	Right Expr   // Right operand
+}
+
+func (*BinaryOp) isExpr() {}
+
+// UnaryOp represents unary operators: +expr, -expr
+//
+// Example: "-sum:metric{*}", "+100", "-func()"
+type UnaryOp struct {
+	Op   string // Operator: "+" or "-"
+	Expr Expr   // Operand expression
+}
+
+func (*UnaryOp) isExpr() {}
+
+// ExprList represents a comma-separated list of expressions at the top level.
+//
+// Example: "metric1{tag:value}, metric2{tag:value}"
+type ExprList struct {
+	Exprs []Expr // List of expressions
+}
+
+func (*ExprList) isExpr() {}
 
 // Modifier represents a metric query modifier.
 //

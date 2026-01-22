@@ -24,6 +24,12 @@ const (
 	tDot
 	tBang
 
+	// arithmetic operators
+	tPlus  // '+'
+	tMinus // '-'
+	tStar  // '*'
+	tSlash // '/'
+
 	// keywords (case-insensitive, only for pure-letter identifiers)
 	tBy
 	tAnd
@@ -93,6 +99,102 @@ func (l *lexer) nextToken() token {
 	case '!':
 		l.i++
 		return token{typ: tBang, lit: "!", pos: pos}
+	case '+':
+		l.i++
+		return token{typ: tPlus, lit: "+", pos: pos}
+	case '*':
+		// Star is tricky: it can be:
+		// 1. Part of an identifier: "metric*" or in scope "{*}" (handled by ident lexing)
+		// 2. A multiplication operator: "a * b" or "(a)*100"
+		// Check if it's a standalone operator
+		if l.i+1 >= l.n {
+			l.i++
+			return token{typ: tStar, lit: "*", pos: pos}
+		}
+		// Check previous character - if it's a delimiter, treat * as operator
+		if pos > 0 {
+			prevCh := l.s[pos-1]
+			if prevCh == ')' || prevCh == '}' || prevCh == ']' ||
+				prevCh == ' ' || prevCh == '\t' || prevCh == '\n' || prevCh == '\r' {
+				l.i++
+				return token{typ: tStar, lit: "*", pos: pos}
+			}
+		}
+		nextCh := l.s[l.i+1]
+		if nextCh == ' ' || nextCh == '\t' || nextCh == '\n' || nextCh == '\r' ||
+			nextCh == '(' || nextCh == ')' || nextCh == '{' || nextCh == '}' ||
+			nextCh == ',' || nextCh == ':' || nextCh == '.' || nextCh == '+' ||
+			nextCh == '-' || nextCh == '*' || nextCh == '/' {
+			l.i++
+			return token{typ: tStar, lit: "*", pos: pos}
+		}
+		// Otherwise, it's part of an identifier (fall through to ident lexing)
+	case '-':
+		// Minus is tricky: it can be:
+		// 1. Part of a negative number: "-100" (handled by number lexing below)
+		// 2. Part of an identifier: "metric-name" (handled by ident lexing)
+		// 3. A unary/binary operator: "a - b" or "-x"
+		// We check if it's followed by a digit (negative number case)
+		if l.i+1 < l.n && isDigit(l.s[l.i+1]) {
+			// Let number lexing handle it (fall through)
+			break
+		}
+		// Check previous character - if it's a delimiter, treat - as operator
+		if pos > 0 {
+			prevCh := l.s[pos-1]
+			if prevCh == ')' || prevCh == '}' || prevCh == ']' ||
+				prevCh == ' ' || prevCh == '\t' || prevCh == '\n' || prevCh == '\r' {
+				l.i++
+				return token{typ: tMinus, lit: "-", pos: pos}
+			}
+		}
+		// Check if it's a standalone operator
+		// If at start of token (after whitespace), treat as operator when followed by letter/delimiter
+		if l.i+1 >= l.n {
+			l.i++
+			return token{typ: tMinus, lit: "-", pos: pos}
+		}
+		nextCh := l.s[l.i+1]
+		// If followed by whitespace, delimiter, or letter (unary operator case), it's an operator
+		if nextCh == ' ' || nextCh == '\t' || nextCh == '\n' || nextCh == '\r' ||
+			nextCh == '(' || nextCh == ')' || nextCh == '{' || nextCh == '}' ||
+			nextCh == ',' || nextCh == ':' || nextCh == '.' || nextCh == '+' ||
+			nextCh == '-' || nextCh == '*' || nextCh == '/' ||
+			((nextCh >= 'a' && nextCh <= 'z') || (nextCh >= 'A' && nextCh <= 'Z') || nextCh == '$') {
+			// Followed by letter means unary operator (e.g., "-sum"), not part of identifier
+			// Followed by delimiter means binary operator
+			l.i++
+			return token{typ: tMinus, lit: "-", pos: pos}
+		}
+		// Otherwise, it's part of an identifier (fall through to ident lexing)
+		// This handles cases like "metric-name" where - is in the middle
+	case '/':
+		// Slash can be:
+		// 1. Part of an identifier: "http/status" (handled by ident lexing)
+		// 2. A division operator: "a / b" or "(a)/100"
+		// Check if it's a standalone operator
+		if l.i+1 >= l.n {
+			l.i++
+			return token{typ: tSlash, lit: "/", pos: pos}
+		}
+		// Check previous character - if it's a delimiter, treat / as operator
+		if pos > 0 {
+			prevCh := l.s[pos-1]
+			if prevCh == ')' || prevCh == '}' || prevCh == ']' ||
+				prevCh == ' ' || prevCh == '\t' || prevCh == '\n' || prevCh == '\r' {
+				l.i++
+				return token{typ: tSlash, lit: "/", pos: pos}
+			}
+		}
+		nextCh := l.s[l.i+1]
+		if nextCh == ' ' || nextCh == '\t' || nextCh == '\n' || nextCh == '\r' ||
+			nextCh == '(' || nextCh == ')' || nextCh == '{' || nextCh == '}' ||
+			nextCh == ',' || nextCh == ':' || nextCh == '.' || nextCh == '+' ||
+			nextCh == '-' || nextCh == '*' || nextCh == '/' {
+			l.i++
+			return token{typ: tSlash, lit: "/", pos: pos}
+		}
+		// Otherwise, it's part of an identifier (fall through to ident lexing)
 	case '\'':
 		// single-quoted string
 		l.i++
