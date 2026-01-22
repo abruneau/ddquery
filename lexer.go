@@ -129,7 +129,6 @@ func (l *lexer) nextToken() token {
 			return token{typ: tStar, lit: "*", pos: pos}
 		}
 		// Otherwise, it's part of an identifier (fall through to ident lexing)
-		break
 	case '-':
 		// Minus is tricky: it can be:
 		// 1. Part of a negative number: "-100" (handled by number lexing below)
@@ -169,7 +168,6 @@ func (l *lexer) nextToken() token {
 		}
 		// Otherwise, it's part of an identifier (fall through to ident lexing)
 		// This handles cases like "metric-name" where - is in the middle
-		break
 	case '/':
 		// Slash can be:
 		// 1. Part of an identifier: "http/status" (handled by ident lexing)
@@ -197,7 +195,6 @@ func (l *lexer) nextToken() token {
 			return token{typ: tSlash, lit: "/", pos: pos}
 		}
 		// Otherwise, it's part of an identifier (fall through to ident lexing)
-		break
 	case '\'':
 		// single-quoted string
 		l.i++

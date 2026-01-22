@@ -238,7 +238,7 @@ func (p *Parser) parseUnary() (Expr, error) {
 	t := p.l.peek()
 	if t.typ == tPlus || t.typ == tMinus {
 		op := t.lit
-		p.l.advance() // consume operator
+		p.l.advance()               // consume operator
 		expr, err := p.parseUnary() // recursive for cases like --x
 		if err != nil {
 			return nil, err
