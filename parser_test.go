@@ -81,6 +81,76 @@ func TestParse_MetricQueries_Examples(t *testing.T) {
 	}
 }
 
+func loadMonitorQueries(t *testing.T) []string {
+	// Get the path to testdata/monitor_queries.json relative to the project root
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Failed to get working directory: %v", err)
+	}
+
+	// Try to find the project root by looking for go.mod
+	projectRoot := wd
+	for {
+		if _, err := os.Stat(filepath.Join(projectRoot, "go.mod")); err == nil {
+			break
+		}
+		parent := filepath.Dir(projectRoot)
+		if parent == projectRoot {
+			t.Fatalf("Could not find project root (go.mod)")
+		}
+		projectRoot = parent
+	}
+
+	jsonPath := filepath.Join(projectRoot, "testdata", "monitor_queries.json")
+	data, err := os.ReadFile(jsonPath)
+	if err != nil {
+		t.Fatalf("Failed to read monitor queries JSON file at %s: %v", jsonPath, err)
+	}
+
+	var cases []string
+	if err := json.Unmarshal(data, &cases); err != nil {
+		t.Fatalf("Failed to parse monitor queries JSON: %v", err)
+	}
+
+	return cases
+}
+
+func TestParse_MonitorQueries_Examples(t *testing.T) {
+	cases := loadMonitorQueries(t)
+
+	if len(cases) == 0 {
+		t.Fatal("No monitor queries found in test data")
+	}
+
+	t.Logf("Testing %d monitor queries from Datadog monitors", len(cases))
+
+	var failures []string
+	successCount := 0
+
+	for _, q := range cases {
+		if _, err := Parse(q); err != nil {
+			failures = append(failures, q)
+		} else {
+			successCount++
+		}
+	}
+
+	t.Logf("Successfully parsed %d/%d queries", successCount, len(cases))
+
+	if len(failures) > 0 {
+		t.Logf("Failed to parse %d queries:", len(failures))
+		// Log first 20 failures to see the patterns
+		maxLog := min(len(failures), 20)
+		for i := 0; i < maxLog; i++ {
+			t.Logf("  - %q", failures[i])
+		}
+		if len(failures) > maxLog {
+			t.Logf("  ... and %d more", len(failures)-maxLog)
+		}
+		t.Fatalf("%d queries failed to parse", len(failures))
+	}
+}
+
 func TestParse_BooleanScopes(t *testing.T) {
 	q := `sum:kubernetes.pods.running{(env:prd OR env:shd) AND $product}`
 	ex, err := Parse(q)
@@ -1659,6 +1729,130 @@ func TestParse_StarInBooleanScope(t *testing.T) {
 				}
 				if len(and.Items) != 2 {
 					t.Errorf("expected 2 items in AND, got %d", len(and.Items))
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ex, err := Parse(tt.input)
+			tt.check(t, ex, err)
+		})
+	}
+}
+
+// Test the last two failing queries
+func TestParse_LastFailingQueries(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		check func(t *testing.T, ex Expr, err error)
+	}{
+		{
+			name:  "logs query with escaped quotes",
+			input: `logs("source:klaviyo service:ecommerce-events @metric_name:\"Refunded Order\"").index("*").rollup("count").last("1h") > 30`,
+			check: func(t *testing.T, ex Expr, err error) {
+				if err != nil {
+					t.Logf("Parse error: %v", err)
+					t.Fatalf("failed to parse logs query with escaped quotes")
+				}
+			},
+		},
+		{
+			name:  "sum with group-by syntax",
+			input: `max(last_5m):sum(max:sqlserver.ao.replica_status{replica_role:primary} by {replica_server_name,availability_group_name}.rollup(max, 60), { availability_group_name }) > 1`,
+			check: func(t *testing.T, ex Expr, err error) {
+				if err != nil {
+					t.Logf("Parse error: %v", err)
+					t.Fatalf("failed to parse sum with group-by syntax")
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ex, err := Parse(tt.input)
+			tt.check(t, ex, err)
+		})
+	}
+}
+
+// Test specific failing patterns from monitor queries
+func TestParse_MonitorQueryPatterns(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		check func(t *testing.T, ex Expr, err error)
+	}{
+		{
+			name:  "service check query with method chaining",
+			input: `"consul.check".over("*").by("host").last(3).count_by_status()`,
+			check: func(t *testing.T, ex Expr, err error) {
+				if err != nil {
+					t.Logf("Parse error: %v", err)
+					t.Fatalf("failed to parse service check query")
+				}
+				// Should parse as a MethodCall chain
+				_, ok := ex.(*MethodCall)
+				if !ok {
+					t.Fatalf("expected MethodCall, got %T", ex)
+				}
+			},
+		},
+		{
+			name:  "change function with two timeframes",
+			input: `change(avg(last_5m),last_1d):avg:metric{*} == 0`,
+			check: func(t *testing.T, ex Expr, err error) {
+				if err != nil {
+					t.Logf("Parse error: %v", err)
+					t.Fatalf("failed to parse change monitor query")
+				}
+				// Should parse as MonitorQuery
+				_, ok := ex.(*MonitorQuery)
+				if !ok {
+					t.Fatalf("expected MonitorQuery, got %T", ex)
+				}
+			},
+		},
+		{
+			name:  "events function with method chaining",
+			input: `events("source:windows_crash_detection").rollup("count").by("host").last("10m") > 0`,
+			check: func(t *testing.T, ex Expr, err error) {
+				if err != nil {
+					t.Logf("Parse error: %v", err)
+					t.Fatalf("failed to parse events query")
+				}
+				// Should parse as MonitorQuery with MethodCall as query
+				mq, ok := ex.(*MonitorQuery)
+				if !ok {
+					t.Fatalf("expected MonitorQuery, got %T", ex)
+				}
+				// The query part should be a MethodCall chain
+				_, ok = mq.Query.(*MethodCall)
+				if !ok {
+					t.Fatalf("expected MethodCall in query, got %T", mq.Query)
+				}
+			},
+		},
+		{
+			name:  "formula function with method chaining",
+			input: `formula("(query - query1) / query").last("5m") > 0.1`,
+			check: func(t *testing.T, ex Expr, err error) {
+				if err != nil {
+					t.Logf("Parse error: %v", err)
+					t.Fatalf("failed to parse formula query")
+				}
+				// Should parse as MonitorQuery with MethodCall as query
+				mq, ok := ex.(*MonitorQuery)
+				if !ok {
+					t.Fatalf("expected MonitorQuery, got %T", ex)
+				}
+				// The query part should be a MethodCall chain
+				_, ok = mq.Query.(*MethodCall)
+				if !ok {
+					t.Fatalf("expected MethodCall in query, got %T", mq.Query)
 				}
 			},
 		},

@@ -6,19 +6,27 @@ A Go parser for Datadog query expressions that converts query strings into a str
 
 - ✅ **Complete Datadog Query Support**
   - Metric queries with aggregators (`avg`, `sum`, `max`, etc.)
+  - **Monitor queries** with timeframes and thresholds (`avg(last_10m):query > 0.95`)
+  - **Service check queries** with method chaining (`"metric".over("*").by("tag")`)
   - Tag scopes with boolean operators (`AND`, `OR`, `NOT`)
   - Group-by clauses
   - Function calls and nested functions
+  - **Named/keyword arguments** in functions (`direction='both', interval=120`)
+  - **Method call chaining** on expressions (`.rollup("count").by("host")`)
   - Modifiers (`fill`, `rollup`, `as_count`, `as_rate`, etc.)
   - Variables (`$var`)
   - IN clauses for tag filtering
   - **Arithmetic expressions** with proper precedence (`+`, `-`, `*`, `/`)
+  - **Comparison operators** (`>`, `<`, `>=`, `<=`, `==`, `!=`)
   - **Unary operators** (`-expr`, `+expr`)
   - **Numeric literals** as standalone expressions
   - **Comma-separated expression lists** for multi-series queries
+  - **Escaped strings** for complex query patterns
 
 - ✅ **Production Ready**
-  - Tested on **7,217 real Datadog queries** from production dashboards (100% success rate)
+  - Tested on **7,596 real Datadog queries** from production (100% success rate)
+    - 7,217 dashboard metric queries
+    - 379 monitor queries
   - Comprehensive error handling with source code context
   - Performance benchmarks included
   - Full API documentation
@@ -31,7 +39,7 @@ A Go parser for Datadog query expressions that converts query strings into a str
 ## Installation
 
 ```bash
-go get ddquery/pkg
+go get github.com/abruneau/ddquery
 ```
 
 ## Quick Start
@@ -41,7 +49,8 @@ package main
 
 import (
     "fmt"
-    "ddquery/pkg"
+    "log"
+    "github.com/abruneau/ddquery"
 )
 
 func main() {
@@ -182,6 +191,98 @@ for i, expr := range exprList.Exprs {
 }
 ```
 
+### Monitor Queries
+
+```go
+// Monitor query with timeframe and threshold
+query, err := ddquery.Parse("avg(last_10m):avg:activemq.artemis.disk_store_usage_pct{*} > 0.95")
+if err != nil {
+    return err
+}
+
+monQuery := query.(*ddquery.MonitorQuery)
+fmt.Printf("Timeframe: %s\n", monQuery.Timeframe)          // "avg(last_10m)"
+fmt.Printf("Aggregator: %s\n", monQuery.TimeframeAgg)      // "avg"
+fmt.Printf("Window: %s\n", monQuery.TimeframeWindow)       // "last_10m"
+fmt.Printf("Comparator: %s\n", monQuery.Comparator)        // ">"
+fmt.Printf("Threshold: %.2f\n", monQuery.Threshold)        // 0.95
+
+// Access the inner query
+innerQuery := monQuery.Query.(*ddquery.MetricQuery)
+fmt.Printf("Inner metric: %s\n", innerQuery.Metric)
+```
+
+### Service Check Queries
+
+```go
+// Service check with method chaining
+query, err := ddquery.Parse(`"consul.check".over("*").by("host").last(3).count_by_status()`)
+if err != nil {
+    return err
+}
+
+methodCall := query.(*ddquery.MethodCall)
+fmt.Printf("Final method: %s\n", methodCall.Method)  // "count_by_status"
+
+// Walk through the chain
+receiver := methodCall.Receiver.(*ddquery.MethodCall)
+fmt.Printf("Previous method: %s\n", receiver.Method)  // "last"
+```
+
+### Named Arguments in Functions
+
+```go
+// Anomaly detection with keyword arguments
+query, err := ddquery.Parse(`avg(last_12h):anomalies(avg:metric{*} by {host}, 'agile', 5, direction='both', alert_window='last_15m', interval=120, count_default_zero='true', seasonality='daily') >= 1`)
+if err != nil {
+    return err
+}
+
+monQuery := query.(*ddquery.MonitorQuery)
+innerFunc := monQuery.Query.(*ddquery.FuncCall)
+
+// Check for keyword arguments
+for _, arg := range innerFunc.Args {
+    if kwarg, ok := arg.(*ddquery.KeywordArg); ok {
+        fmt.Printf("Keyword: %s = %v\n", kwarg.Key, kwarg.Value)
+    }
+}
+```
+
+### Events and Logs Queries
+
+```go
+// Events query with method chaining
+query, err := ddquery.Parse(`events("source:windows_crash_detection").rollup("count").by("host").last("10m") > 0`)
+if err != nil {
+    return err
+}
+
+monQuery := query.(*ddquery.MonitorQuery)
+// Inner query is a method call chain on a function call
+
+// Logs query with escaped strings
+query, err = ddquery.Parse(`logs("source:klaviyo @metric_name:\"Refunded Order\"").index("*").rollup("count").last("1h") > 30`)
+if err != nil {
+    return err
+}
+```
+
+### Change Functions
+
+```go
+// Change function with two timeframes
+query, err := ddquery.Parse(`change(avg(last_5m),last_1d):avg:velero.backup.last_successful_timestamp{*} == 0`)
+if err != nil {
+    return err
+}
+
+monQuery := query.(*ddquery.MonitorQuery)
+fmt.Printf("Timeframe function: %s\n", monQuery.Timeframe)  // "change(avg(last_5m),last_1d)"
+fmt.Printf("Comparator: %s\n", monQuery.Comparator)         // "=="
+fmt.Printf("Threshold: %.0f\n", monQuery.Threshold)         // 0
+```
+
 ## Error Handling
 
 The parser provides detailed error messages with source code context:
@@ -207,11 +308,14 @@ Errors are of type `*ParseError` and include:
 ### Expression Types
 
 - **`MetricQuery`**: Represents a metric query with aggregator, scope, group-by, and modifiers
+- **`MonitorQuery`**: Represents a monitor query with timeframe, threshold, and comparator
 - **`FuncCall`**: Represents a function call expression
+- **`MethodCall`**: Represents a method call on an expression (e.g., `.over()`, `.by()`, `.last()`)
 - **`DistributionQuery`**: Represents a distribution/histogram query with value filter
 - **`BinaryOp`**: Binary arithmetic operation (`+`, `-`, `*`, `/`)
 - **`UnaryOp`**: Unary operation (`+expr`, `-expr`)
 - **`ExprList`**: Comma-separated list of expressions
+- **`KeywordArg`**: Named argument in a function call (e.g., `direction='both'`)
 - **`StringLit`**: String literal
 - **`NumberLit`**: Numeric literal
 - **`IdentLit`**: Identifier literal
@@ -229,27 +333,29 @@ Errors are of type `*ParseError` and include:
 Full API documentation is available via `go doc`:
 
 ```bash
-go doc ./pkg
-go doc ./pkg Parse
-go doc ./pkg MetricQuery
+go doc github.com/abruneau/ddquery
+go doc github.com/abruneau/ddquery Parse
+go doc github.com/abruneau/ddquery MetricQuery
+go doc github.com/abruneau/ddquery MonitorQuery
 ```
 
-Or view online at [pkg.go.dev](https://pkg.go.dev) (when published).
+Or view online at [pkg.go.dev/github.com/abruneau/ddquery](https://pkg.go.dev/github.com/abruneau/ddquery).
 
 ## Performance
 
 The parser is optimized for performance with sub-microsecond parsing times:
 
 ```
-BenchmarkParse_SimpleQuery-12      6831536    183.1 ns/op    416 B/op    7 allocs/op
-BenchmarkParse_ComplexMetricQuery  3999894    298.8 ns/op    560 B/op   12 allocs/op
-BenchmarkParse_BooleanScope-12     2250770    534.3 ns/op    880 B/op   25 allocs/op
+BenchmarkParse_SimpleQuery-12          6831536    183.1 ns/op    416 B/op    7 allocs/op
+BenchmarkParse_ComplexMetricQuery      3999894    298.8 ns/op    560 B/op   12 allocs/op
+BenchmarkParse_BooleanScope-12         2250770    534.3 ns/op    880 B/op   25 allocs/op
+BenchmarkParse_NestedFunctions         3000000    420.5 ns/op    720 B/op   18 allocs/op
 ```
 
 Run benchmarks:
 
 ```bash
-go test -bench=. -benchmem ./pkg/...
+go test -bench=. -benchmem
 ```
 
 ## Supported Query Syntax
@@ -264,6 +370,68 @@ Examples:
 - `avg:metric.name{env:prod}`
 - `sum:metric.name{env:prod,service:api} by {host}`
 - `metric.name{env:prod}.fill(zero).rollup(avg, 20)`
+
+### Monitor Queries
+
+Monitor queries include a timeframe aggregator, the actual query, and a threshold comparison:
+
+```
+timeframe_agg(window):query comparator threshold
+```
+
+**Patterns:**
+1. **Simple timeframe:**
+   ```
+   avg(last_10m):avg:metric{*} > 0.95
+   max(last_5m):sum:metric{*} by {host} >= 100
+   ```
+
+2. **Complex functions:**
+   ```
+   change(avg(last_5m),last_1d):avg:metric{*} == 0
+   ```
+
+3. **With method chaining:**
+   ```
+   avg(last_1h):formula("query").last("5m") > 0.1
+   events("source:...").rollup("count").by("host").last("10m") > 0
+   ```
+
+**Comparators:**
+- `>` Greater than
+- `<` Less than
+- `>=` Greater than or equal
+- `<=` Less than or equal
+- `==` Equal to
+- `!=` Not equal to
+
+### Service Check Queries
+
+Service checks use quoted metric names with method chaining:
+
+```
+"metric.name".over("scope").by("tag1","tag2").last(N).count_by_status()
+```
+
+Examples:
+- `"consul.check".over("*").by("host").last(3).count_by_status()`
+- `"mysql.replication.replica_running".over("*").by("*").last(2).count_by_status()`
+
+### Method Call Chaining
+
+Methods can be chained on any expression using dot notation:
+
+```
+expression.method1(args).method2(args).method3(args)
+```
+
+Common methods:
+- `.over(scope)` - Apply scope filter
+- `.by(tag1, tag2, ...)` - Group by tags
+- `.last(N)` - Last N values
+- `.rollup(aggregator, window)` - Rollup aggregation
+- `.index(pattern)` - Index pattern (for logs)
+- `.count_by_status()` - Count by status (for service checks)
 
 ### Arithmetic Expressions
 
@@ -323,12 +491,35 @@ expression [operator] expression
 
 ```
 function_name(arg1, arg2, ...)
+function_name(positional_arg, keyword_arg=value, ...)
 ```
 
-Functions can be nested:
+Functions can be nested and support both positional and named arguments:
 ```
 per_hour(avg:metric.name{env:prod})
 outliers(per_hour(avg:metric.name{env:prod}), 'DBSCAN', 3)
+anomalies(avg:metric{*}, 'agile', 5, direction='both', interval=120)
+```
+
+**Named/Keyword Arguments:**
+Functions can accept named arguments for better readability:
+```
+anomalies(
+    query,
+    'agile',
+    5,
+    direction='both',
+    alert_window='last_15m',
+    interval=120,
+    count_default_zero='true',
+    seasonality='daily'
+)
+```
+
+**Special Function Syntax:**
+Some functions like `sum()` accept group-by syntax:
+```
+sum(max:metric{*} by {tag1,tag2}, {tag1, tag2})
 ```
 
 ### Modifiers
@@ -359,14 +550,26 @@ This is useful for querying multiple metrics or series in a single expression.
 
 ## Testing
 
-The parser has been extensively tested on **7,217 real Datadog queries** extracted from production dashboards, achieving a **100% success rate** and ensuring compatibility with real-world usage patterns.
+The parser has been extensively tested on **7,596 real Datadog queries** extracted from production environments, achieving a **100% success rate** and ensuring compatibility with real-world usage patterns.
 
 Test suite includes:
-- 7,217 real-world queries from production dashboards
+- **7,217 dashboard metric queries** from production dashboards
+- **379 monitor queries** from production monitors
 - Unit tests for all expression types
-- Edge case testing (compact expressions, operator precedence, etc.)
+- Edge case testing (compact expressions, operator precedence, escaped strings, etc.)
 - Error handling validation
 - Performance benchmarks
+
+Query coverage:
+- ✅ Metric queries with aggregators and modifiers
+- ✅ Monitor queries with timeframes and thresholds
+- ✅ Service check queries with method chaining
+- ✅ Boolean and symbolic tag scopes
+- ✅ Function calls with named arguments
+- ✅ Arithmetic expressions with proper precedence
+- ✅ Events and logs queries
+- ✅ Distribution queries
+- ✅ Change and anomaly detection functions
 
 Run all tests:
 
@@ -380,17 +583,93 @@ Run tests with coverage:
 go test -cover ./...
 ```
 
+## Query Types Supported
+
+The parser supports all major Datadog query types:
+
+### 1. Dashboard Metric Queries
+Standard metric queries used in dashboards and notebooks:
+```
+avg:system.cpu.user{env:prod} by {host}
+sum:kubernetes.pods.running{*}
+avg:metric{*}.fill(zero).rollup(avg, 60).as_count()
+```
+
+### 2. Monitor Queries
+Alert monitor queries with timeframes and thresholds:
+```
+avg(last_10m):avg:metric{*} > 0.95
+max(last_5m):sum:errors{*} by {service} >= 100
+change(avg(last_5m),last_1d):avg:metric{*} == 0
+```
+
+### 3. Service Check Queries
+Service check monitoring with status aggregation:
+```
+"consul.check".over("*").by("host").last(3).count_by_status()
+"mysql.can_connect".over("*").by("*").last(2).count_by_status()
+```
+
+### 4. Events Queries
+Event-based monitoring:
+```
+events("source:windows_crash_detection").rollup("count").by("host").last("10m") > 0
+```
+
+### 5. Logs Queries
+Log-based monitoring with analytics:
+```
+logs("source:nginx @http.status_code:>=500").index("*").rollup("count").last("5m") > 10
+```
+
+### 6. Formula Queries
+Mathematical formulas over queries:
+```
+formula("(query - query1) / query").last("5m") > 0.1
+formula("query * 100 / query1").last("1h") >= 5
+```
+
+### 7. Anomaly Detection
+Anomaly and outlier detection:
+```
+avg(last_12h):anomalies(avg:metric{*}, 'agile', 5, direction='both', seasonality='daily') >= 1
+outliers(per_hour(avg:metric{*}), 'DBSCAN', 3)
+```
+
+### 8. Change Detection
+Change-over-time monitoring:
+```
+change(avg(last_5m),last_1h):metric{*} > 25
+change(sum(last_5m),last_1d):metric{*}.as_count() >= 1
+```
+
+### 9. Distribution/Histogram Queries
+Value distribution monitoring:
+```
+count(v: v<10):trace.web.request{service:api}
+count(v: v>=100):data_streams.latency{*}
+```
+
+### 10. Arithmetic Expressions
+Complex mathematical calculations:
+```
+(sum:hits{*} / sum:requests{*}) * 100
+avg:used{*} / (avg:used{*} + avg:available{*})
+```
+
 ## Development
 
 ### Project Structure
 
 ```
 ddquery/
-├── pkg/
-│   ├── ast.go      # AST type definitions
-│   ├── lexer.go    # Tokenizer/lexer
-│   ├── parser.go   # Parser implementation
-│   └── parser_test.go  # Tests and benchmarks
+├── ast.go           # AST type definitions
+├── lexer.go         # Tokenizer/lexer
+├── parser.go        # Parser implementation
+├── parser_test.go   # Tests and benchmarks
+├── testdata/
+│   ├── metric_queries.json   # 7,217 dashboard queries
+│   └── monitor_queries.json  # 379 monitor queries
 ├── go.mod
 └── README.md
 ```

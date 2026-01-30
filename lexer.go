@@ -97,8 +97,38 @@ func (l *lexer) nextToken() token {
 		l.i++
 		return token{typ: tDot, lit: ".", pos: pos}
 	case '!':
+		// Check for !=
+		if l.i+1 < l.n && l.s[l.i+1] == '=' {
+			l.i += 2
+			return token{typ: tIdent, lit: "!=", pos: pos}
+		}
 		l.i++
 		return token{typ: tBang, lit: "!", pos: pos}
+	case '>':
+		// Check for >=
+		if l.i+1 < l.n && l.s[l.i+1] == '=' {
+			l.i += 2
+			return token{typ: tIdent, lit: ">=", pos: pos}
+		}
+		l.i++
+		return token{typ: tIdent, lit: ">", pos: pos}
+	case '<':
+		// Check for <=
+		if l.i+1 < l.n && l.s[l.i+1] == '=' {
+			l.i += 2
+			return token{typ: tIdent, lit: "<=", pos: pos}
+		}
+		l.i++
+		return token{typ: tIdent, lit: "<", pos: pos}
+	case '=':
+		// Check for ==
+		if l.i+1 < l.n && l.s[l.i+1] == '=' {
+			l.i += 2
+			return token{typ: tIdent, lit: "==", pos: pos}
+		}
+		// Single = is used for keyword arguments
+		l.i++
+		return token{typ: tIdent, lit: "=", pos: pos}
 	case '+':
 		l.i++
 		return token{typ: tPlus, lit: "+", pos: pos}
@@ -199,28 +229,66 @@ func (l *lexer) nextToken() token {
 		// single-quoted string
 		l.i++
 		start := l.i
+		var result strings.Builder
 		for l.i < l.n && l.s[l.i] != '\'' {
-			// no escape handling (Datadog examples typically don't require it)
-			l.i++
+			if l.s[l.i] == '\\' && l.i+1 < l.n {
+				// Handle escape sequences
+				l.i++
+				switch l.s[l.i] {
+				case '\'', '"', '\\':
+					result.WriteByte(l.s[l.i])
+				default:
+					// For other escape sequences, keep the backslash
+					result.WriteByte('\\')
+					result.WriteByte(l.s[l.i])
+				}
+				l.i++
+			} else {
+				result.WriteByte(l.s[l.i])
+				l.i++
+			}
 		}
 		if l.i >= l.n {
-			return token{typ: tString, lit: l.s[start:], pos: pos} // parser will error on missing close if needed
+			lit := result.String()
+			if lit == "" {
+				lit = l.s[start:]
+			}
+			return token{typ: tString, lit: lit, pos: pos}
 		}
-		lit := l.s[start:l.i]
+		lit := result.String()
 		l.i++ // consume closing '
 		return token{typ: tString, lit: lit, pos: pos}
 	case '"':
 		// double-quoted string
 		l.i++
 		start := l.i
+		var result strings.Builder
 		for l.i < l.n && l.s[l.i] != '"' {
-			// no escape handling (Datadog examples typically don't require it)
-			l.i++
+			if l.s[l.i] == '\\' && l.i+1 < l.n {
+				// Handle escape sequences
+				l.i++
+				switch l.s[l.i] {
+				case '\'', '"', '\\':
+					result.WriteByte(l.s[l.i])
+				default:
+					// For other escape sequences, keep the backslash
+					result.WriteByte('\\')
+					result.WriteByte(l.s[l.i])
+				}
+				l.i++
+			} else {
+				result.WriteByte(l.s[l.i])
+				l.i++
+			}
 		}
 		if l.i >= l.n {
-			return token{typ: tString, lit: l.s[start:], pos: pos} // parser will error on missing close if needed
+			lit := result.String()
+			if lit == "" {
+				lit = l.s[start:]
+			}
+			return token{typ: tString, lit: lit, pos: pos}
 		}
-		lit := l.s[start:l.i]
+		lit := result.String()
 		l.i++ // consume closing "
 		return token{typ: tString, lit: lit, pos: pos}
 	}
