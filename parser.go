@@ -4,16 +4,22 @@
 // that can be programmatically inspected and manipulated. It supports:
 //
 //   - Metric queries with aggregators (avg, sum, max, etc.)
+//   - Monitor queries with timeframes and thresholds (avg(last_10m):query > 0.95)
+//   - Service check queries with method chaining ("metric".over("*").by("tag").last(3))
 //   - Tag scopes with boolean operators (AND, OR, NOT)
 //   - Group-by clauses
 //   - Function calls and nested functions
+//   - Method call chaining on expressions
+//   - Named/keyword arguments in functions (direction='both', interval=120)
 //   - Modifiers (fill, rollup, as_count, etc.)
 //   - Variables ($var)
 //   - IN clauses for tag filtering
 //   - Arithmetic expressions with proper precedence (+, -, *, /)
+//   - Comparison operators (>, <, >=, <=, ==, !=)
 //   - Unary operators (+expr, -expr)
 //   - Numeric literals as standalone expressions
 //   - Comma-separated expression lists
+//   - Escaped characters in strings
 //
 // Example:
 //
@@ -138,6 +144,18 @@ type Parser struct {
 // detailed position information and source code context.
 func Parse(s string) (Expr, error) {
 	p := &Parser{l: newLexer(s), src: s}
+	
+	// Try to parse as a monitor query first (timeframe:query comparator threshold)
+	if mq, err := p.tryParseMonitorQuery(); err == nil && mq != nil {
+		// Check for EOF
+		if p.l.peek().typ != tEOF {
+			t := p.l.peek()
+			return nil, p.errf(t, "unexpected token %q after end of expression", t.lit)
+		}
+		return mq, nil
+	}
+	
+	// Otherwise, parse as a normal expression
 	ex, err := p.parseExpr()
 	if err != nil {
 		return nil, err
@@ -261,16 +279,17 @@ func (p *Parser) parsePrimary() (Expr, error) {
 		if err := p.expect(tRParen, "expected ')' to close parenthesized expression"); err != nil {
 			return nil, err
 		}
-		return ex, nil
+		// Check for method calls on parenthesized expressions
+		return p.parsePostfix(ex)
 	}
 
 	// literals
 	if t.typ == tString {
-		// Check for unterminated string (lexer returns string token even if unterminated)
-		// We can detect this by checking if the string ends at EOF without proper closing
-		// For now, we accept the string as-is since the lexer handles it
+		// String literals can have method calls chained on them
+		// Example: "metric.name".over("*").by("host")
 		p.l.advance()
-		return &StringLit{Value: t.lit}, nil
+		expr := &StringLit{Value: t.lit}
+		return p.parsePostfix(expr)
 	}
 	if t.typ == tNumber {
 		p.l.advance()
@@ -290,7 +309,12 @@ func (p *Parser) parsePrimary() (Expr, error) {
 
 		// function call lookahead: IDENT '('
 		if p.peek2().typ == tLParen {
-			return p.parseFuncCall()
+			fc, err := p.parseFuncCall()
+			if err != nil {
+				return nil, err
+			}
+			// Check for method calls on function results
+			return p.parsePostfix(fc)
 		}
 
 		// metric query or ident literal:
@@ -307,6 +331,204 @@ func (p *Parser) parsePrimary() (Expr, error) {
 	}
 
 	return nil, p.errf(t, "unexpected token %q (expected expression)", t.lit)
+}
+
+// parsePostfix handles postfix operators like method calls
+// Example: expr.method(args)
+func (p *Parser) parsePostfix(expr Expr) (Expr, error) {
+	for {
+		t := p.l.peek()
+		if t.typ == tDot {
+			p.l.advance() // consume '.'
+			methodTok := p.l.peek()
+			// Allow both identifiers and keywords as method names
+			// This allows .by(), .and(), etc. to work even though "by" and "and" are keywords
+			if methodTok.typ != tIdent && methodTok.typ != tBy && methodTok.typ != tAnd && 
+			   methodTok.typ != tOr && methodTok.typ != tNot && methodTok.typ != tIn {
+				return nil, p.errf(methodTok, "expected method name after '.'")
+			}
+			methodName := p.l.advance().lit
+			
+			// Method calls require parentheses
+			if p.l.peek().typ != tLParen {
+				return nil, p.errf(p.l.peek(), "expected '(' after method name")
+			}
+			p.l.advance() // consume '('
+			
+			// Parse method arguments
+			args := []Expr{}
+			if p.l.peek().typ != tRParen {
+				for {
+					arg, err := p.parseAddSub()
+					if err != nil {
+						return nil, err
+					}
+					args = append(args, arg)
+					if p.l.peek().typ == tComma {
+						p.l.advance()
+						continue
+					}
+					break
+				}
+			}
+			
+			if err := p.expect(tRParen, "expected ')' to close method arguments"); err != nil {
+				return nil, err
+			}
+			
+			expr = &MethodCall{
+				Receiver: expr,
+				Method:   methodName,
+				Args:     args,
+			}
+		} else {
+			break
+		}
+	}
+	return expr, nil
+}
+
+func (p *Parser) tryParseMonitorQuery() (*MonitorQuery, error) {
+	// Monitor query patterns:
+	// 1. timeframe_agg(timeframe_window):query comparator threshold
+	//    Example: avg(last_10m):avg:metric{*} > 0.95
+	// 2. func(args...):query comparator threshold
+	//    Example: change(avg(last_5m),last_1d):avg:metric{*} == 0
+	// 3. query comparator threshold (no timeframe prefix)
+	//    Example: formula("...").last("5m") > 0.1
+	
+	// Save lexer state for rollback
+	save := *p.l
+	restore := func() { p.l = &save }
+	
+	var timeframe, timeframeAgg, timeframeWindow string
+	var query Expr
+	var err error
+	
+	// Try pattern 1 & 2: func(...):query
+	if p.l.peek().typ == tIdent {
+		firstIdentPos := p.l.peek().pos
+		
+		// Try to parse as function call with ':' after it
+		if p.peek2().typ == tLParen {
+			// This looks like a function call
+			// Try to find the matching ')' followed by ':'
+			funcSave := *p.l
+			
+			// Parse the function call
+			funcName := p.l.advance().lit
+			p.l.advance() // consume '('
+			
+			// Scan for matching ')'
+			depth := 1
+			argStart := p.l.peek().pos
+			for depth > 0 && p.l.peek().typ != tEOF {
+				t := p.l.peek()
+				if t.typ == tLParen {
+					depth++
+				} else if t.typ == tRParen {
+					depth--
+				}
+				if depth > 0 {
+					p.l.advance()
+				}
+			}
+			
+			if p.l.peek().typ != tRParen {
+				restore()
+				return nil, nil
+			}
+			argEnd := p.l.peek().pos
+			p.l.advance() // consume ')'
+			
+			// Check if followed by ':'
+			if p.l.peek().typ == tColon {
+				// This is a timeframe function
+				p.l.advance() // consume ':'
+				
+				// Extract timeframe string from source
+				timeframe = p.src[firstIdentPos:argEnd+1]
+				timeframeAgg = funcName
+				// Extract window from arguments (simplified - just take first arg if it's simple)
+				if argEnd > argStart {
+					timeframeWindow = p.src[argStart:argEnd]
+				}
+				
+				// Parse the inner query expression
+				query, err = p.parseAddSub()
+				if err != nil {
+					restore()
+					return nil, nil
+				}
+			} else {
+				// Not a timeframe function, restore and try pattern 3
+				p.l = &funcSave
+				goto tryPattern3
+			}
+		} else {
+			// Not a function call, try pattern 3
+			goto tryPattern3
+		}
+	} else {
+		// No identifier at start, try pattern 3
+		goto tryPattern3
+	}
+	
+	goto checkComparator
+	
+tryPattern3:
+	// Pattern 3: query comparator threshold (no timeframe prefix)
+	// Parse the query expression
+	query, err = p.parseAddSub()
+	if err != nil {
+		restore()
+		return nil, nil
+	}
+	
+checkComparator:
+	// Look for comparison operator
+	// Operators can be: >, <, >=, <=, ==, !=
+	t := p.l.peek()
+	var comparator string
+	
+	// Check for comparison operators (they come as identifiers from the lexer)
+	if t.typ == tIdent {
+		switch t.lit {
+		case ">", "<", ">=", "<=", "==", "!=":
+			comparator = t.lit
+			p.l.advance()
+		default:
+			// Not a comparison operator, rollback
+			restore()
+			return nil, nil
+		}
+	} else {
+		// No comparison operator
+		restore()
+		return nil, nil
+	}
+	
+	// Must have threshold number
+	thresholdTok := p.l.peek()
+	if thresholdTok.typ != tNumber {
+		restore()
+		return nil, nil
+	}
+	threshold, err := parseFloatStrict(thresholdTok.lit)
+	if err != nil {
+		restore()
+		return nil, nil
+	}
+	p.l.advance() // consume number
+	
+	return &MonitorQuery{
+		Timeframe:       timeframe,
+		TimeframeAgg:    timeframeAgg,
+		TimeframeWindow: timeframeWindow,
+		Query:           query,
+		Comparator:      comparator,
+		Threshold:       threshold,
+	}, nil
 }
 
 func (p *Parser) tryParseDistributionQuery() (*DistributionQuery, error) {
@@ -353,19 +575,12 @@ func (p *Parser) tryParseDistributionQuery() (*DistributionQuery, error) {
 
 	// Get comparison operator
 	opTok := p.l.peek()
-	if opTok.typ != tIdent || (opTok.lit != "<" && opTok.lit != ">") {
+	if opTok.typ != tIdent || (opTok.lit != "<" && opTok.lit != ">" && opTok.lit != "<=" && opTok.lit != ">=") {
 		restore()
 		return nil, nil
 	}
-	opLit := opTok.lit
-	p.l.advance() // consume < or >
-
-	// Check for optional '=' for <= or >=
-	comparator := opLit
-	if p.l.peek().typ == tIdent && p.l.peek().lit == "=" {
-		comparator = opLit + "="
-		p.l.advance() // consume '='
-	}
+	comparator := opTok.lit
+	p.l.advance() // consume comparison operator
 
 	// Get the threshold number
 	numTok := p.l.peek()
@@ -419,9 +634,32 @@ func (p *Parser) parseFuncCall() (Expr, error) {
 	args := []Expr{}
 	if p.l.peek().typ != tRParen {
 		for {
-			// Use parseAddSub() instead of parseExpr() to avoid creating ExprList
-			// Function arguments are already comma-separated by the loop here
-			arg, err := p.parseAddSub()
+			// Check if this is a keyword argument (IDENT '=')
+			if p.l.peek().typ == tIdent {
+				// Look ahead to see if there's an '=' sign
+				save := *p.l
+				keyTok := p.l.advance()
+				if p.l.peek().typ == tIdent && p.l.peek().lit == "=" {
+					// This is a keyword argument
+					p.l.advance() // consume '='
+					value, err := p.parseFuncArg()
+					if err != nil {
+						return nil, err
+					}
+					args = append(args, &KeywordArg{Key: keyTok.lit, Value: value})
+					if p.l.peek().typ == tComma {
+						p.l.advance()
+						continue
+					}
+					break
+				} else {
+					// Not a keyword argument, restore and parse as normal
+					p.l = &save
+				}
+			}
+			
+			// Parse as normal positional argument
+			arg, err := p.parseFuncArg()
 			if err != nil {
 				return nil, err
 			}
@@ -437,7 +675,34 @@ func (p *Parser) parseFuncCall() (Expr, error) {
 	if err := p.expect(tRParen, "expected ')' to close function arguments"); err != nil {
 		return nil, err
 	}
-	return &FuncCall{Name: name, Args: args}, nil
+	fc := &FuncCall{Name: name, Args: args}
+	
+	// Check for method calls on function results
+	return p.parsePostfix(fc)
+}
+
+// parseFuncArg parses a function argument, which can be:
+// - A metric query with aggregator (e.g., max:metric{...})
+// - A brace-enclosed tag list (e.g., {tag1, tag2})
+// - An arithmetic expression (which may contain metric queries)
+func (p *Parser) parseFuncArg() (Expr, error) {
+	// Check for brace-enclosed tag list: { tag1, tag2, ... }
+	if p.l.peek().typ == tLBrace {
+		// This is a special group-by syntax used in some functions like sum()
+		p.l.advance() // consume '{'
+		tags, err := p.parseIdentListUntil(tRBrace)
+		if err != nil {
+			return nil, err
+		}
+		// Return as an IdentLit with comma-separated tags
+		// This is a simplified representation
+		return &IdentLit{Name: "{" + strings.Join(tags, ",") + "}"}, nil
+	}
+	
+	// Parse as arithmetic expression (which will handle metric queries, numbers, identifiers, etc.)
+	// parseAddSub will call parseMulDiv, which calls parseUnary, which calls parsePrimary.
+	// parsePrimary will try to parse metric queries through tryParseMetricQuery.
+	return p.parseAddSub()
 }
 
 func (p *Parser) tryParseMetricQuery() (*MetricQuery, error) {

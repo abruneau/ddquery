@@ -6,12 +6,15 @@ package ddquery
 //   - MetricQuery: A metric query with aggregator, scope, and modifiers
 //   - FuncCall: A function call expression
 //   - DistributionQuery: A distribution query with value filter
+//   - MethodCall: A method call on an expression
+//   - MonitorQuery: A monitor query with timeframe and threshold
 //   - StringLit: A string literal
 //   - NumberLit: A numeric literal
 //   - IdentLit: An identifier literal
 //   - BinaryOp: A binary arithmetic operation (+, -, *, /)
 //   - UnaryOp: A unary operation (+expr, -expr)
 //   - ExprList: A comma-separated list of expressions
+//   - KeywordArg: A keyword argument in a function call
 type Expr interface {
 	isExpr()
 }
@@ -116,6 +119,41 @@ type ExprList struct {
 }
 
 func (*ExprList) isExpr() {}
+
+// MethodCall represents a method call on an expression.
+//
+// Example: "metric".over("*").by("host")
+type MethodCall struct {
+	Receiver Expr   // The expression being called (e.g., a StringLit or another MethodCall)
+	Method   string // Method name (e.g., "over", "by", "last")
+	Args     []Expr // Method arguments
+}
+
+func (*MethodCall) isExpr() {}
+
+// MonitorQuery represents a monitor query with timeframe and threshold.
+//
+// Example: avg(last_10m):avg:metric{*} > 0.95
+type MonitorQuery struct {
+	Timeframe       string  // Full timeframe string, e.g., "avg(last_10m)"
+	TimeframeAgg    string  // Just the aggregator part, e.g., "avg"
+	TimeframeWindow string  // Just the window part, e.g., "last_10m"
+	Query           Expr    // The inner query expression
+	Comparator      string  // Comparison operator (e.g., ">", ">=", "<", "<=", "==", "!=")
+	Threshold       float64 // Threshold value for comparison
+}
+
+func (*MonitorQuery) isExpr() {}
+
+// KeywordArg represents a keyword argument in a function call.
+//
+// Example: direction='both', interval=120
+type KeywordArg struct {
+	Key   string // Argument name
+	Value Expr   // Argument value
+}
+
+func (*KeywordArg) isExpr() {}
 
 // Modifier represents a metric query modifier.
 //
