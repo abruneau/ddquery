@@ -341,6 +341,8 @@ go doc github.com/abruneau/ddquery MonitorQuery
 
 Or view online at [pkg.go.dev/github.com/abruneau/ddquery](https://pkg.go.dev/github.com/abruneau/ddquery).
 
+For an in-depth explanation of how the parser works internally, what AST nodes are produced for every kind of input, and how edge cases are handled, see the [Parsing Documentation](doc/PARSING.md).
+
 ## Performance
 
 The parser is optimized for performance with sub-microsecond parsing times:
